@@ -493,13 +493,33 @@
     }
     await log(`Fab：免费列表 ${items.length} 个`);
 
-    // /library 整页 HTML 里直接带已拥有条目的标题 —— 这是唯一能验"真的入库"的判据
-    // （/i/library/*、/i/listings/states* 那族接口全 404；add-to-library 对已拥有也回 204）
-    let libHtml = '';
-    try {
-      const lr = await fetch('/library', { credentials: 'include' });
-      if (lr.ok) libHtml = (await lr.text()).toLowerCase();
-    } catch (e) { /* 拿不到就当没证据，不冒充 */ }
+    // 已拥有判据：/i/library/search?q=标题（实测 200，results[].listing.title 就是库里的）。
+    // 别用整页 /library 扫 —— 它只渲染第一页（约 48 条），早领过的会漏；
+    // add-to-library 对已拥有也回 204、加购物车也回 201，两个都不能当判据。
+    const ownedCache = new Map();
+    const normT = (x) => String(x || '').replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'")
+      .replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+    async function fabOwned(title) {
+      const want = normT(title);
+      if (!want) return false;
+      if (ownedCache.has(want)) return ownedCache.get(want);
+      let owned = false;
+      try {
+        const r = await fetch(`/i/library/search?q=${encodeURIComponent(String(title).slice(0, 60))}&count=10`,
+          { credentials: 'include', headers: { Accept: 'application/json' } });
+        if (r.ok) {
+          const j = await r.json();
+          for (const row of (j.results || [])) {
+            const got = normT((row.listing && row.listing.title) || row.title || '');
+            if (!got) continue;
+            if (got === want || (want.length >= 12 && want.slice(0, 24) === got.slice(0, 24))
+              || want.slice(0, 24).includes(got.slice(0, 24)) && got.length >= 12) { owned = true; break; }
+          }
+        }
+      } catch (e) { /* 查不到就当没证据，不冒充 */ }
+      ownedCache.set(want, owned);
+      return owned;
+    }
 
     const h = await hist(K.fabHist);
     let done = 0;
@@ -512,7 +532,7 @@
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
-      if (libHtml && title.trim() && libHtml.includes(title.trim().toLowerCase())) {
+      if (await fabOwned(title)) {
         await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
         dailyOwned.push(title);
         ownedCount++;

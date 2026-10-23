@@ -68,8 +68,11 @@ sandbox.fetch = async (url, opts = {}) => {
   if (u.startsWith('/i/listings/search') && u.includes('is_free=1')) {
     return resp(200, { results: [{ uid: FREE_ID, title: 'Coffee Table Round' }] });
   }
-  if (u === '/library') {
-    return resp(200, '<html><body><div>Coffee Table Round</div></body></html>', 'text');
+  if (u.startsWith('/i/library/search')) {
+    // 真实接口：GET /i/library/search?q=… → {results:[{listing:{title}}]}
+    const q = decodeURIComponent((u.split('q=')[1] || '').split('&')[0]);
+    const owned = ['Coffee Table Round'].filter((t) => t.toLowerCase().includes(q.toLowerCase()));
+    return resp(200, { results: owned.map((t) => ({ listing: { title: t } })) });
   }
   if (u === `/i/listings/${LIMIT_ID}`) {
     return resp(200, {
@@ -120,9 +123,9 @@ check('真的走到了 finalize', finalized === 1, `finalize 次数 ${finalized}
 check('add-to-library 的 400 被识别后转购物车',
   calls.some((c) => c.includes('add-to-library')) && calls.some((c) => c === 'POST /i/cart/validate'));
 check('购物车清干净了', cartHasItem === false);
-check('/library 里已有的条目没再下单', !(hist[FREE_ID] && hist[FREE_ID].verified !== true),
+check('/i/library/search 里已有的条目没再下单', !(hist[FREE_ID] && hist[FREE_ID].verified !== true),
   JSON.stringify(hist[FREE_ID] || {}).slice(0, 100));
-check('没对已拥有的条目发 add-to-library', !calls.some((c) => c.includes(FREE_ID)));
+check('没对已拥有的条目发 add-to-library 请求', !calls.some((c) => c.includes(FREE_ID)));
 
 const daily = store.get('efc:daily') || {};
 const fab = daily.fab || {};
