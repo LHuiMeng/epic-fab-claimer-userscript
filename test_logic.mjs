@@ -129,3 +129,42 @@ for (const [t, want] of ctaCases) {
   if (!ok) process.exit(1);
 }
 console.log('CLAIM-DETECT PASS');
+
+// ── freeUntilOf：永久免费 / 限时免费 / 过期 / 未开始 / 要钱 ──
+{
+  const now = Date.now();
+  const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, 'Z');
+  const cases = [
+    ['永久免费', { priceTier: { price: 0 } }, true],
+    ['限时免费·进行中', { priceTier: { price: 49.99, discountedPrice: 0, effectiveDiscountPercentage: 100,
+      discountStartDate: iso(now - 86400000), discountEndDate: iso(now + 86400000) } }, true],
+    ['限时免费·已过期', { priceTier: { price: 49.99, discountedPrice: 0, effectiveDiscountPercentage: 100,
+      discountStartDate: iso(now - 5 * 86400000), discountEndDate: iso(now - 86400000) } }, false],
+    ['限时免费·没开始', { priceTier: { price: 49.99, discountedPrice: 0, effectiveDiscountPercentage: 100,
+      discountStartDate: iso(now + 86400000), discountEndDate: iso(now + 5 * 86400000) } }, false],
+    ['要钱', { priceTier: { price: 19.99, discountedPrice: 9.99, effectiveDiscountPercentage: 50 } }, false],
+    ['空档位', {}, false],
+  ];
+  let bad = 0;
+  for (const [name, lic, want] of cases) {
+    const got = I.freeUntilOf(lic).free;
+    const ok = got === want;
+    if (!ok) bad++;
+    console.log(`${ok ? 'PASS' : 'FAIL'} freeUntilOf(${name}) = ${got}（期望 ${want}）`);
+  }
+  const until = I.freeUntilOf({ priceTier: { price: 9, discountedPrice: 0,
+    discountStartDate: iso(now - 1000), discountEndDate: iso(now + 3600000) } }).until;
+  const okT = typeof until === 'number' && until > now;
+  if (!okT) bad++;
+  console.log(`${okT ? 'PASS' : 'FAIL'} freeUntilOf 返回截止时间戳 ${until}`);
+  if (bad) { console.error(`FREE-UNTIL FAIL: ${bad} 个用例不符`); process.exit(1); }
+  console.log('FREE-UNTIL PASS');
+}
+
+// ── dayKey：本地日期 YYYY-MM-DD，同日同值、换日必变 ──
+{
+  const k = I.dayKey();
+  const ok = /^\d{4}-\d{2}-\d{2}$/.test(k) && k === I.dayKey();
+  console.log(`${ok ? 'PASS' : 'FAIL'} dayKey() = ${k}`);
+  if (!ok) process.exit(1);
+}

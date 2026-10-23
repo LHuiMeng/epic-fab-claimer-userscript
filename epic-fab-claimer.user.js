@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.2.0
-// @description  打开浏览器时自动扫描 Epic 本周免费游戏与 Fab 免费资产并自动领取；遇真人验证会高亮等你点。
+// @version      1.3.0
+// @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
 // @supportURL   https://github.com/LHuiMeng/epic-fab-claimer-userscript/issues
@@ -39,6 +39,9 @@
     lastFabScan: 'efc:last:fab',
     lastAutoOpen: 'efc:last:autoopen',
     openTabs: 'efc:openTabs',
+    daily: 'efc:daily',        // 当天汇总（跨标签共享）
+    toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
+    toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
@@ -237,11 +240,185 @@
   }
   function isProTier(l) { return tierRank(l) === 0; }
 
+  // 免费有两种，实测两手都要认：
+  // 1. 永久免费 priceTier.price === 0
+  // 2. 限时免费 priceTier.price 是原价，但 discountedPrice === 0 /
+  //    effectiveDiscountPercentage === 100，且当前落在 discountStartDate~discountEndDate 之间
+  function freeUntilOf(l) {
+    const pt = (l && l.priceTier) || {};
+    const now = Date.now();
+    if (typeof pt.price === 'number' && pt.price === 0) return { free: true, until: null };
+    const zeroNow = (typeof pt.discountedPrice === 'number' && pt.discountedPrice === 0)
+      || pt.effectiveDiscountPercentage === 100;
+    if (!zeroNow) return { free: false, until: null };
+    const s = pt.discountStartDate ? Date.parse(pt.discountStartDate) : 0;
+    const e = pt.discountEndDate ? Date.parse(pt.discountEndDate) : 0;
+    if (s && now < s) return { free: false, until: null };
+    if (e && now > e) return { free: false, until: null };
+    return { free: true, until: e || null };
+  }
+
+  // ══════════════════════════ 每日汇总 + 悬浮窗 ══════════════════════════
+  const FAB_HOME = 'https://www.fab.com';
+
+  function dayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  async function dailyGet() {
+    const d = await gmGet(K.daily, null);
+    if (!d || d.day !== dayKey()) return { day: dayKey(), startedAt: 0, epic: null, fab: null };
+    return d;
+  }
+
+  async function dailyPatch(site, patch) {
+    const d = await dailyGet();
+    d.day = dayKey();
+    d[site] = Object.assign({}, d[site] || {}, patch, { at: Date.now() });
+    await gmSet(K.daily, d);
+    return d;
+  }
+
+  function toastHide() {
+    const el = document.getElementById('efc-toast');
+    if (el) el.remove();
+  }
+
+  // 不抢焦点的角落浮窗：只在自身区域吃点击，不遮页面、不弹模态
+  function showToast(title, lines, opts) {
+    const o = opts || {};
+    let el = document.getElementById('efc-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'efc-toast';
+      el.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:2147483647;max-width:340px;'
+        + 'font:13px/1.65 "Microsoft YaHei",system-ui,sans-serif;color:#f0f1f4;background:rgba(22,24,30,.95);'
+        + 'border:1px solid rgba(255,255,255,.13);border-radius:10px;padding:9px 12px;'
+        + 'box-shadow:0 8px 28px rgba(0,0,0,.45);text-align:left;';
+      document.body.appendChild(el);
+    }
+    el.textContent = '';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:flex-start;gap:8px;font-weight:600;margin-bottom:3px;';
+    const t = document.createElement('span');
+    t.textContent = title;
+    t.style.flex = '1';
+    const x = document.createElement('span');
+    x.textContent = '✕';
+    x.title = '今天不再提醒';
+    x.style.cssText = 'cursor:pointer;opacity:.5;font-weight:400;padding:0 2px;';
+    x.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      await gmSet(K.toastOff, dayKey());
+      toastHide();
+    });
+    head.appendChild(t);
+    head.appendChild(x);
+    el.appendChild(head);
+    for (const ln of lines || []) {
+      const row = document.createElement('div');
+      row.textContent = ln.text;
+      const color = ln.tone === 'bad' ? '#ff9a9a'
+        : ln.tone === 'warn' ? '#ffd48a'
+          : ln.tone === 'ok' ? '#8fe3a5' : '#e8e9ec';
+      row.style.cssText = `opacity:${ln.dim ? '.72' : '1'};color:${color};`;
+      el.appendChild(row);
+    }
+    if (!o.keep) {
+      setTimeout(() => { if (document.getElementById('efc-toast') === el) toastHide(); }, 25000);
+    }
+  }
+
+  function summaryLines(d) {
+    const out = [];
+    const e = d.epic;
+    const f = d.fab;
+    if (e) {
+      if (!e.listed) out.push({ text: 'Epic：本周没有免费游戏', dim: true });
+      else if (e.opened) out.push({ text: `Epic：本周 ${e.listed} 个，已开 ${e.opened} 个领取页自动点`, tone: 'ok' });
+      else out.push({ text: `Epic：本周 ${e.listed} 个，都领过了`, dim: true });
+      for (const t of (e.failed || []).slice(0, 2)) out.push({ text: `✗ ${t}`, tone: 'bad' });
+    }
+    if (f) {
+      if (f.skipped) out.push({ text: 'Fab：今天已检查过（在冷却期内）', dim: true });
+      else {
+        if ((f.claimed || []).length) {
+          out.push({ text: `Fab：领到 ${f.claimed.length} 个`, tone: 'ok' });
+          for (const t of f.claimed.slice(0, 3)) out.push({ text: `· ${t}`, dim: true });
+        }
+        if (f.ownedCount) out.push({ text: `Fab：${f.ownedCount} 个早就在库里（领过了）`, dim: true });
+        if (!(f.claimed || []).length && !f.ownedCount) {
+          out.push({ text: f.listed ? 'Fab：没有新的免费条目' : 'Fab：暂时没有免费条目', dim: true });
+        }
+      }
+      for (const t of (f.failed || []).slice(0, 2)) out.push({ text: `✗ ${t.title || t}`, tone: 'bad' });
+    }
+    if (!out.length) out.push({ text: '没有可领取的', dim: true });
+    return out;
+  }
+
+  function sitesDone(d, st) {
+    if (st.autoEpic && !(d.epic && d.epic.done)) return false;
+    if (st.autoFab && !(d.fab && d.fab.done)) return false;
+    return !!(d.epic || d.fab);
+  }
+
+  // 在任意网站上跑：今天第一次 → 开两个后台标签去扫；已有结果 → 直接汇报
+  async function dailyCheck() {
+    const st = await settings();
+    if (!st.autoEpic && !st.autoFab) return;
+    if ((await gmGet(K.toastOff, '')) === dayKey()) return;   // 今天被 X 掉了
+    const d = await dailyGet();
+    if (d.day === dayKey() && sitesDone(d, st)) {
+      // 同一天最多主动弹 3 次，别每开一个标签页都糊一脸
+      const shown = await gmGet(K.toastShown, {});
+      const n = shown.day === dayKey() ? shown.n : 0;
+      if (n < 3) {
+        await gmSet(K.toastShown, { day: dayKey(), n: n + 1 });
+        showToast('免费内容检查完毕', summaryLines(d));
+      }
+      return;
+    }
+    if (d.startedAt && Date.now() - d.startedAt < 10 * 60000) {   // 正在跑，等结果
+      pollDaily(st);
+      return;
+    }
+    await gmSet(K.daily, { day: dayKey(), startedAt: Date.now(), epic: null, fab: null });
+    let opened = 0;
+    if (st.autoEpic) { gmOpenTab(`${STORE}/zh-CN/free-games?efc=scan`, { active: false }); opened++; }
+    if (st.autoFab) { gmOpenTab(`${FAB_HOME}/limited-time-free?efc=scan`, { active: false }); opened++; }
+    if (!opened) return;
+    const n = await gmGet(K.openTabs, 0);
+    await gmSet(K.openTabs, n + opened);
+    showToast('正在检查免费内容…', [{ text: 'Epic 每周免费 + Fab 免费/限时免费', dim: true }], { keep: true });
+    pollDaily(st);
+  }
+
+  async function pollDaily(st) {
+    for (let i = 0; i < 45; i++) {
+      await sleep(4000);
+      if ((await gmGet(K.toastOff, '')) === dayKey()) return;
+      const d = await dailyGet();
+      if (sitesDone(d, st)) {
+        const anyBad = (d.epic && (d.epic.failed || []).length) || (d.fab && (d.fab.failed || []).length);
+        showToast(anyBad ? '有项目领取失败' : '免费内容检查完毕', summaryLines(d));
+        if (anyBad) gmNotify('有免费内容没领到，点开面板看原因', 'Epic/Fab 领取');
+        return;
+      }
+      showToast('正在检查免费内容…', [{ text: `${d.epic ? 'Epic 已扫' : 'Epic 扫描中'} · ${d.fab ? 'Fab 已扫' : 'Fab 扫描中'}`, dim: true }], { keep: true });
+    }
+    showToast('检查超时', [{ text: '没等到结果，点面板「立即扫描本轮」重试', tone: 'warn' }]);
+  }
+
   async function fabRun(force) {
     const st = await settings();
     if (!force && !st.autoFab) return;
     const last = await gmGet(K.lastFabScan, 0);
-    if (!force && Date.now() - last < st.fabScanHours * 3600000) return;
+    if (!force && Date.now() - last < st.fabScanHours * 3600000) {
+      await dailyPatch('fab', { done: true, skipped: true, listed: 0 });
+      return;
+    }
     await gmSet(K.lastFabScan, Date.now());
 
     mountPanel('Fab 免费资产');
@@ -251,6 +428,8 @@
     const csrf = cookieVal('fab_csrftoken');
     if (!csrf) {
       await log('Fab：没有 fab_csrftoken cookie，可能未登录 — 本次跳过', 'warn');
+      await dailyPatch('fab', { done: true, listed: 0, claimed: [],
+        failed: [{ title: 'Fab 未登录', reason: '没有 fab_csrftoken' }] });
       ui.busy(false, true);
       return;
     }
@@ -264,6 +443,8 @@
       else if (r.status === 401 || r.status === 403) {
         await log('Fab：未登录（/i/users/me → ' + r.status + '），先登录 Fab 再扫', 'warn');
         bigBanner('Fab 还没登录 —— 登录一次后点「立即扫描本轮」', 'rgba(200,120,20,.95)');
+        await dailyPatch('fab', { done: true, listed: 0, claimed: [],
+          failed: [{ title: 'Fab 未登录', reason: `/i/users/me ${r.status}` }] });
         ui.busy(false, true);
         return;
       }
@@ -274,26 +455,64 @@
 
     let items = [];
     try {
-      const r = await fetch('/i/listings/search?is_free=1&count=60&sort_by=-createdAt', {
-        credentials: 'include', headers: { Accept: 'application/json' },
+      // 两条口子都要：永久免费在 is_free=1；**限时免费只在 100% 折扣这条**，
+      // 实测它不出现在 is_free=1 里，这也是"限时免费没领"的根因。
+      const sources = [
+        '/i/listings/search?min_discount_percentage=100&count=60&sort_by=-createdAt',
+        '/i/listings/search?is_free=1&count=60&sort_by=-createdAt',
+      ];
+      const seen = new Set();
+      for (const src of sources) {
+        const r = await fetch(src, { credentials: 'include', headers: { Accept: 'application/json' } });
+        if (!r.ok) { await log(`Fab：列表 ${src.split('?')[1]} → HTTP ${r.status}`, 'warn'); continue; }
+        const j = await r.json();
+        for (const it of (j.results || j.listings || [])) {
+          const id = it.uid || it.id;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          items.push(it);
+        }
+      }
+      items.sort((a, b) => {
+        // 会过期的先处理：限时免费的排前面
+        const la = a.hasEffectiveDiscounts || a.isDiscounted ? 0 : 1;
+        const lb = b.hasEffectiveDiscounts || b.isDiscounted ? 0 : 1;
+        return la - lb;
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const j = await r.json();
-      items = j.results || j.listings || [];
     } catch (e) {
       await log(`Fab：列表失败 ${e.message}`, 'warn');
+      await dailyPatch('fab', { done: true, listed: 0, claimed: [],
+        failed: [{ title: 'Fab 列表拉取失败', reason: e.message }] });
       ui.busy(false, true);
       return;
     }
     await log(`Fab：免费列表 ${items.length} 个`);
 
+    // /library 整页 HTML 里直接带已拥有条目的标题 —— 这是唯一能验"真的入库"的判据
+    // （/i/library/*、/i/listings/states* 那族接口全 404；add-to-library 对已拥有也回 204）
+    let libHtml = '';
+    try {
+      const lr = await fetch('/library', { credentials: 'include' });
+      if (lr.ok) libHtml = (await lr.text()).toLowerCase();
+    } catch (e) { /* 拿不到就当没证据，不冒充 */ }
+
     const h = await hist(K.fabHist);
     let done = 0;
+    let ownedCount = 0;
+    const dailyClaimed = [];
+    const dailyOwned = [];
+    const dailyFailed = [];
     for (const it of items) {
       if (done >= st.maxFabPerRun) break;
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
+      if (libHtml && title.trim() && libHtml.includes(title.trim().toLowerCase())) {
+        await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
+        dailyOwned.push(title);
+        ownedCount++;
+        continue;
+      }
       let upgrading = false;
       if (prev && prev.state === 'claimed') {
         // 已经领过：只有在「当初拿的不是专业版」时才回头补专业版，别重复下单
@@ -306,19 +525,29 @@
 
       let offer = null;
       let tier = '';
+      let lic = null;
+      let until = null;
       try {
         const d = await fetch(`/i/listings/${encodeURIComponent(id)}`, {
           credentials: 'include', headers: { Accept: 'application/json' },
         });
         if (d.ok) {
           const det = await d.json();
-          const free = (det.licenses || []).filter((l) => {
-            const p = l.priceTier && l.priceTier.price;
-            return p === 0 || p === '0';
-          });
+          const free = [];
+          for (const l of det.licenses || []) {
+            const fu = freeUntilOf(l);
+            if (!fu.free) continue;
+            free.push(l);
+            l.__until = fu.until;
+          }
           // 专业版优先；专业版要钱时才退而领个人版
           free.sort((a, b) => tierRank(a) - tierRank(b));
-          if (free.length) { offer = free[0].offerId; tier = free[0].name || ''; }
+          if (free.length) {
+            lic = free[0];
+            offer = lic.offerId;
+            tier = lic.name || '';
+            until = lic.__until || null;
+          }
         }
       } catch (e) { /* 落到下面统一记失败 */ }
 
@@ -327,7 +556,8 @@
         await log(`Fab：${title.slice(0, 28)} 没有免费档位，跳过`, 'warn');
         continue;
       }
-      if (upgrading && !isProTier(tier)) {
+      const tierLabel = until ? `${tier}·限时到 ${new Date(until).toLocaleDateString('zh-CN')}` : tier;
+      if (upgrading && !isProTier(lic || tier)) {
         // 专业版仍然要钱 → 保持个人版；记下检查时间，省得每轮都去问一遍
         await setHist(K.fabHist, id, {
           title, state: 'claimed', at: prev.at || Date.now(),
@@ -336,12 +566,12 @@
         continue;
       }
       if (st.dryRun) {
-        await log(`Fab：[仅扫描] ${upgrading ? '可补专业版' : '可领'} ${title.slice(0, 28)}〔${tier}〕`, 'ok');
+        await log(`Fab：[仅扫描] ${upgrading ? '可补专业版' : '可领'} ${title.slice(0, 28)}〔${tierLabel}〕`, 'ok');
         done++;
         continue;
       }
 
-      let ok = false, why = '', status = 0, authFail = false;
+      let ok = false, why = '', status = 0, authFail = false, needCart = false;
       for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
         try {
           const fd = new FormData();
@@ -360,14 +590,25 @@
           try { body = (await r.text()).slice(0, 160); } catch (e) { /* ignore */ }
           why = `HTTP ${status}${body ? ' ' + body : ''}`;
           if (status === 401) { authFail = true; break; }
+          // 限时免费不认折扣价：add-to-library 一律 400 "Not free."，得走购物车结算
+          if (status === 400 && /Not free/i.test(body)) { needCart = true; break; }
           if (status === 429) { await log('Fab：被限流，20s 后重试', 'warn'); await sleep(20000); }
           else if (status === 403) { await log('Fab：CSRF 被拒（cookie 与头不一致），可能是页面 cookie 刚刷新', 'warn'); await sleep(1500); }
           else break;
         } catch (e) { why = e.message; break; }
       }
+      if (!ok && needCart && lic) {
+        // 购物车链路：加购 → 校验 totalPrice.discountPrice 必须是 0 → validate → finalize
+        const res = await fabClaimViaCart(id, lic, csrf, title);
+        ok = res.ok;
+        why = res.why || why;
+      }
       if (ok) {
-        await setHist(K.fabHist, id, { title, state: 'claimed', at: Date.now(), offer, license: tier });
-        await log(`Fab：${upgrading ? '补领专业版' : '领到'} ${title.slice(0, 30)}〔${tier}〕`, 'ok');
+        const rec = { title, state: 'claimed', at: Date.now(), offer, license: tier };
+        if (until) rec.until = until;
+        await setHist(K.fabHist, id, rec);
+        await log(`Fab：${upgrading ? '补领专业版' : '领到'} ${title.slice(0, 30)}〔${tierLabel}〕`, 'ok');
+        dailyClaimed.push(title);
         done++;
       } else if (authFail) {
         // 401 = 这个会话没登录/已过期，不是这一条的问题，别再拿后面的条目继续撞
@@ -375,16 +616,71 @@
         await log(`Fab：401 未授权 —— 登录态失效，本轮停手（${title.slice(0, 20)}）`, 'warn');
         bigBanner('Fab 登录态失效：登录一次后我会自动接着领', 'rgba(200,120,20,.95)');
         gmNotify('Fab 需要重新登录', 'Fab 领取');
+        dailyFailed.push({ title, reason: '未登录' });
         break;
       } else {
         await setHist(K.fabHist, id, { title, state: 'failed', at: Date.now(), why });
         await log(`Fab：${title.slice(0, 26)} 失败 ${why}`, 'warn');
+        dailyFailed.push({ title, reason: why });
       }
       await sleep(1200);
     }
     await log(`Fab：本轮结束，处理 ${done} 个`);
     if (done) gmNotify(`本轮领取 ${done} 个 Fab 免费资产`, 'Fab 领取完成');
+    await dailyPatch('fab', {
+      done: true, listed: items.length, claimed: dailyClaimed,
+      owned: dailyOwned, ownedCount, failed: dailyFailed,
+    });
     ui.busy(false);
+  }
+
+  // 限时免费专用：走购物车结算。**任何一个环节不是 0 元就撤单**，绝不动钱。
+  async function fabClaimViaCart(listingId, lic, csrf, title) {
+    const H = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/plain, */*',
+      'X-CsrfToken': csrf,
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+    const drop = async () => {
+      try {
+        const cart = await (await fetch('/i/cart', { credentials: 'include', headers: { Accept: 'application/json' } })).json();
+        for (const it of (cart.items || [])) {
+          if (it.listingUid === listingId) {
+            await fetch(`/i/cart/items/${encodeURIComponent(it.uid)}`, { method: 'DELETE', credentials: 'include', headers: H });
+          }
+        }
+      } catch (e) { /* ignore */ }
+    };
+    try {
+      const add = await fetch('/i/cart/items', {
+        method: 'POST', credentials: 'include', headers: H,
+        body: JSON.stringify({ listingLicense: lic.listingLicenseId }),
+      });
+      if (!add.ok) return { ok: false, why: `加购 HTTP ${add.status}` };
+      const cart = await (await fetch('/i/cart', { credentials: 'include', headers: { Accept: 'application/json' } })).json();
+      const total = cart && cart.totalPrice ? cart.totalPrice.discountPrice : null;
+      if (!(total === 0)) {
+        await drop();
+        return { ok: false, why: `购物车合计 ${total}，不是 0 元 —— 已撤单` };
+      }
+      const v = await fetch('/i/cart/validate', {
+        method: 'POST', credentials: 'include', headers: H,
+        body: JSON.stringify({ offer_ids: [lic.offerId] }),
+      });
+      if (!v.ok) { await drop(); return { ok: false, why: `validate HTTP ${v.status}` }; }
+      const f = await fetch('/i/payment/finalize', {
+        method: 'POST', credentials: 'include', headers: H,
+        body: JSON.stringify({ offer_ids: [lic.offerId] }),
+      });
+      await drop();
+      if (!f.ok) return { ok: false, why: `finalize HTTP ${f.status}` };
+      await log(`Fab：${title.slice(0, 24)} 走购物车结算成功（0 元）`, 'ok');
+      return { ok: true };
+    } catch (e) {
+      await drop();
+      return { ok: false, why: '购物车流程 ' + e.message };
+    }
   }
 
   // ══════════════════════════════ Epic 部分 ══════════════════════════════
@@ -468,11 +764,16 @@
       games = await fetchFreeGames();
     } catch (e) {
       await log(`Epic：列表失败 ${e.message}`, 'warn');
+      await dailyPatch('epic', { done: true, listed: 0, opened: 0, failed: [`列表拉取失败：${e.message}`] });
       ui.busy(false, true);
       return;
     }
     await log(`Epic：本周免费 ${games.length} 个`);
-    if (!games.length) { ui.busy(false); return; }
+    if (!games.length) {
+      await dailyPatch('epic', { done: true, listed: 0, opened: 0, failed: [] });
+      ui.busy(false);
+      return;
+    }
 
     const h = await hist(K.epicHist);
     const cool = (st.epicRetryMinutes || 120) * 60000;
@@ -494,6 +795,7 @@
     }
     if (!todo.length) {
       await log('Epic：本周的都处理过了，没有要开的');
+      await dailyPatch('epic', { done: true, listed: games.length, opened: 0, failed: [] });
       ui.busy(false);
       return;
     }
@@ -507,6 +809,7 @@
     }
     if (st.dryRun) {
       for (const g of todo) await log(`Epic：[仅扫描] 可领 ${g.title}`, 'ok');
+      await dailyPatch('epic', { done: true, listed: games.length, opened: 0, failed: [] });
       ui.busy(false);
       return;
     }
@@ -524,6 +827,10 @@
     }
     await log(`Epic：已开 ${batch.length} 个标签，进度看那些标签页的面板`);
     if (batch.length) gmNotify(`已打开 ${batch.length} 个 Epic 领取页，正在自动点`, 'Epic 领取');
+    await dailyPatch('epic', {
+      done: true, listed: games.length, opened: batch.length,
+      failed: soon.map((g) => `${g.title}（48h 内到期）`).slice(0, 3),
+    });
     ui.busy(false);
   }
 
@@ -641,6 +948,15 @@
     return /in library|已在库|已加入库/i.test(String(t || ''));
   }
 
+  async function epicNote(field, entry) {
+    const d = await dailyGet();
+    const e = Object.assign({}, d.epic || {});
+    e[field] = (e[field] || []).slice();
+    e[field].push(entry);
+    if (e.listed === undefined) e.listed = e[field].length;
+    await dailyPatch('epic', e);
+  }
+
   async function epicClaimInThisTab(g) {
     const title = g.title || '未知游戏';
     mountPanel(`领取：${title.slice(0, 14)}`);
@@ -651,6 +967,7 @@
     if (location.pathname.includes('/id/login')) {
       await setHist(K.epicHist, g.id, { title, state: 'needs-login', at: Date.now() });
       await log('Epic：被踢到登录页，需要重新登录 Epic 账号', 'warn');
+      await epicNote('failed', { title, reason: '被踢到登录页' });
       bigBanner('需要重新登录 Epic，登录后刷新本页');
       ui.busy(false, true);
       return;
@@ -709,6 +1026,7 @@
     if (owned) {
       await setHist(K.epicHist, g.id, { title, state: 'claimed', at: Date.now(), note: '早已在库', verified: true });
       await log(`Epic：${title} 已在库`);
+      await epicNote('claimed', title);
       ui.busy(false);
       return;
     }
@@ -717,12 +1035,14 @@
       if (/sign in|登录|Account id is missing/i.test(t)) {
         await setHist(K.epicHist, g.id, { title, state: 'needs-login', at: Date.now() });
         await log('Epic：页面要求登录（Account id is missing / 登录），请在浏览器里登一次', 'warn');
+      await epicNote('failed', { title, reason: '需要登录 Epic' });
         bigBanner('需要登录 Epic 才能领取，登录后刷新');
         ui.busy(false, true);
         return;
       }
       await setHist(K.epicHist, g.id, { title, state: 'failed', at: Date.now(), why: '没等到领取按钮' });
       await log('Epic：60 秒没等到领取按钮（选择器可能又变了，把这一页截图给桃夭）', 'warn');
+      await epicNote('failed', { title, reason: '没等到领取按钮' });
       bigBanner('没找到领取按钮 — 把这一页截图发给桃夭', 'rgba(200,120,20,.95)');
       ui.busy(false, true);
       return;
@@ -758,6 +1078,7 @@
     if (result === 'ok') {
       await setHist(K.epicHist, g.id, { title, state: 'claimed', at: Date.now(), verified: true });
       await log(`Epic：${title} 领取成功 ✅`, 'ok');
+      await epicNote('claimed', title);
       bigBanner(`✅ ${title} 已入库`, 'rgba(30,140,80,.95)');
       gmNotify(`${title} 已领取`, 'Epic 领取成功');
       await sleep(4000);
@@ -767,10 +1088,12 @@
       // 卡在验证码：不判失败，等你处理完再刷新本页重试
       await setHist(K.epicHist, g.id, { title, state: 'needs-human', at: Date.now() });
       await log('Epic：卡在真人验证，已记 needs-human；你过完验证码后可点「立即扫描本轮」重试', 'warn');
+      await epicNote('failed', { title, reason: '等你过真人验证' });
       ui.busy(false, true);
     } else {
       await setHist(K.epicHist, g.id, { title, state: 'failed', at: Date.now(), why: '等结果超时' });
       await log('Epic：5 分钟没等到成功提示，记失败；截图发给桃夭看卡在哪', 'warn');
+      await epicNote('failed', { title, reason: '等结果超时' });
       bigBanner('没等到成功提示 — 把这一页截图发给桃夭', 'rgba(200,120,20,.95)');
       ui.busy(false, true);
     }
@@ -808,6 +1131,7 @@
       if (location.pathname.startsWith('/login') || location.pathname.startsWith('/signin')) return;
       mountPanel('Fab 免费资产');
       await fabRun(false);
+      if (new URLSearchParams(location.search).get('efc') === 'scan') await closeSelfIfOpened();
       return;
     }
     if (host.endsWith('epicgames.com')) {
@@ -820,21 +1144,12 @@
       return;
     }
 
-    // 其他站点：每天第一次打开浏览器时，静默开一个后台标签去扫 Epic
-    const st = await settings();
-    if (!st.autoEpic) return;
-    const lastOpen = await gmGet(K.lastAutoOpen, 0);
-    if (Date.now() - lastOpen < st.epicScanHours * 3600000) return;
-    const lastScan = await gmGet(K.lastEpicScan, 0);
-    if (Date.now() - lastScan < st.epicScanHours * 3600000) return;  // 刚扫过，别开空标签
-    await gmSet(K.lastAutoOpen, Date.now());
-    const n = await gmGet(K.openTabs, 0);
-    await gmSet(K.openTabs, n + 1);
-    gmOpenTab(`${STORE}/zh-CN/free-games?efc=scan`, { active: false });
+    // 其他任何站点：每天第一次打开浏览器就开始干活（不再只认 Epic/Fab 站点）
+    await dailyCheck();
   }
 
   // 给离线自测留出口（node 里 stub 一个 window 就能验纯逻辑，不影响正常使用）
-  window.__efcInternals = { freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, successText, ownedCtaText };
+  window.__efcInternals = { freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines };
 
   // 单页只跑一次；Epic 站内路由切换不重复触发
   if (window.__efcBooted) return;
