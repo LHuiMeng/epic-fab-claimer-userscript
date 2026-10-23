@@ -384,10 +384,14 @@
       pollDaily(st);
       return;
     }
+    const mine = Date.now();
     await gmSet(K.daily, {
-      day: dayKey(), startedAt: Date.now(),
+      day: dayKey(), startedAt: mine,
       epic: d.epic || null, fab: d.fab || null,
     });
+    // 多个标签同时恢复时可能一起进这儿，抢到的那个才继续，别开两套标签
+    const again = await dailyGet();
+    if (again.startedAt !== mine) return;
     let opened = 0;
     const needEpic = st.autoEpic && !(d.epic && d.epic.done) && skipSite !== 'epic';
     const needFab = st.autoFab && !(d.fab && d.fab.done) && skipSite !== 'fab';
