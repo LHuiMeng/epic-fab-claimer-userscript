@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.3.0
+// @version      1.3.1
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -348,6 +348,7 @@
           for (const t of f.claimed.slice(0, 3)) out.push({ text: `· ${t}`, dim: true });
         }
         if (f.ownedCount) out.push({ text: `Fab：${f.ownedCount} 个早就在库里（领过了）`, dim: true });
+        if (f.noTierCount) out.push({ text: `Fab：${f.noTierCount} 个现在不免费（折扣已过）`, dim: true });
         if (!(f.claimed || []).length && !f.ownedCount) {
           out.push({ text: f.listed ? 'Fab：没有新的免费条目' : 'Fab：暂时没有免费条目', dim: true });
         }
@@ -528,6 +529,7 @@
     const h = await hist(K.fabHist);
     let done = 0;
     let ownedCount = 0;
+    let noTierCount = 0;
     const dailyClaimed = [];
     const dailyOwned = [];
     const dailyFailed = [];
@@ -540,6 +542,7 @@
         await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
         dailyOwned.push(title);
         ownedCount++;
+        await log(`Fab：${title.slice(0, 26)} 已在库里（领过了），跳过`);
         continue;
       }
       let upgrading = false;
@@ -582,7 +585,8 @@
 
       if (!offer) {
         await setHist(K.fabHist, id, { title, state: 'no-free-tier', at: Date.now() });
-        await log(`Fab：${title.slice(0, 28)} 没有免费档位，跳过`, 'warn');
+        await log(`Fab：${title.slice(0, 28)} 当前没有免费档位（原价/折扣已过），跳过`, 'warn');
+        noTierCount++;
         continue;
       }
       const tierLabel = until ? `${tier}·限时到 ${new Date(until).toLocaleDateString('zh-CN')}` : tier;
@@ -619,8 +623,11 @@
           try { body = (await r.text()).slice(0, 160); } catch (e) { /* ignore */ }
           why = `HTTP ${status}${body ? ' ' + body : ''}`;
           if (status === 401) { authFail = true; break; }
-          // 限时免费不认折扣价：add-to-library 一律 400 "Not free."，得走购物车结算
-          if (status === 400 && /Not free/i.test(body)) { needCart = true; break; }
+          // 限时免费不认折扣价：add-to-library 回 400 "Not free."，必须走购物车结算。
+          // 报错文案会变（中英/版本都可能不同），所以只要这一档是"限时免费"就兜底走购物车，
+          // 购物车那边会自己校验 0 元，安全。
+          if ((status === 400 || status === 409 || status === 422)
+            && (until || /not free|免费|free/i.test(body))) { needCart = true; break; }
           if (status === 429) { await log('Fab：被限流，20s 后重试', 'warn'); await sleep(20000); }
           else if (status === 403) { await log('Fab：CSRF 被拒（cookie 与头不一致），可能是页面 cookie 刚刷新', 'warn'); await sleep(1500); }
           else break;
@@ -654,11 +661,11 @@
       }
       await sleep(1200);
     }
-    await log(`Fab：本轮结束，处理 ${done} 个`);
+    await log(`Fab：本轮结束 —— 新领 ${done} 个 / 已在库 ${ownedCount} 个 / 无免费档 ${noTierCount} 个 / 失败 ${dailyFailed.length} 个`);
     if (done) gmNotify(`本轮领取 ${done} 个 Fab 免费资产`, 'Fab 领取完成');
     await dailyPatch('fab', {
       done: true, listed: items.length, claimed: dailyClaimed,
-      owned: dailyOwned, ownedCount, failed: dailyFailed,
+      owned: dailyOwned, ownedCount, noTierCount, failed: dailyFailed,
     });
     ui.busy(false);
   }
