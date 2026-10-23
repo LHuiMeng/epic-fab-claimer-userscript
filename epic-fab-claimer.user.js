@@ -365,7 +365,7 @@
   }
 
   // 在任意网站上跑：今天第一次 → 开两个后台标签去扫；已有结果 → 直接汇报
-  async function dailyCheck() {
+  async function dailyCheck(skipSite) {
     const st = await settings();
     if (!st.autoEpic && !st.autoFab) return;
     if ((await gmGet(K.toastOff, '')) === dayKey()) return;   // 今天被 X 掉了
@@ -384,10 +384,15 @@
       pollDaily(st);
       return;
     }
-    await gmSet(K.daily, { day: dayKey(), startedAt: Date.now(), epic: null, fab: null });
+    await gmSet(K.daily, {
+      day: dayKey(), startedAt: Date.now(),
+      epic: d.epic || null, fab: d.fab || null,
+    });
     let opened = 0;
-    if (st.autoEpic) { gmOpenTab(`${STORE}/zh-CN/free-games?efc=scan`, { active: false }); opened++; }
-    if (st.autoFab) { gmOpenTab(`${FAB_HOME}/limited-time-free?efc=scan`, { active: false }); opened++; }
+    const needEpic = st.autoEpic && !(d.epic && d.epic.done) && skipSite !== 'epic';
+    const needFab = st.autoFab && !(d.fab && d.fab.done) && skipSite !== 'fab';
+    if (needEpic) { gmOpenTab(`${STORE}/zh-CN/free-games?efc=scan`, { active: false }); opened++; }
+    if (needFab) { gmOpenTab(`${FAB_HOME}/limited-time-free?efc=scan`, { active: false }); opened++; }
     if (!opened) return;
     const n = await gmGet(K.openTabs, 0);
     await gmSet(K.openTabs, n + opened);
@@ -753,7 +758,10 @@
     const st = await settings();
     if (!force && !st.autoEpic) return;
     const last = await gmGet(K.lastEpicScan, 0);
-    if (!force && Date.now() - last < st.epicScanHours * 3600000) return;
+    if (!force && Date.now() - last < st.epicScanHours * 3600000) {
+      await dailyPatch('epic', { done: true, skipped: true, listed: 0, opened: 0, failed: [] });
+      return;
+    }
     await gmSet(K.lastEpicScan, Date.now());
 
     mountPanel('Epic 免费游戏');
@@ -1131,7 +1139,11 @@
       if (location.pathname.startsWith('/login') || location.pathname.startsWith('/signin')) return;
       mountPanel('Fab 免费资产');
       await fabRun(false);
-      if (new URLSearchParams(location.search).get('efc') === 'scan') await closeSelfIfOpened();
+      if (new URLSearchParams(location.search).get('efc') === 'scan') {
+        await closeSelfIfOpened();   // 这是我们自己开的扫描标签，扫完就退场（汇总由发起页去弹）
+        return;
+      }
+      await dailyCheck('fab');       // 用户自己开的 Fab 页：把 Epic 那半边也补上
       return;
     }
     if (host.endsWith('epicgames.com')) {
@@ -1140,7 +1152,11 @@
       mountPanel('Epic 免费游戏');
       await epicScan(false);
       // 我们自己开出来做扫描的后台标签，扫完就关掉，别留在标签栏里
-      if (new URLSearchParams(location.search).get('efc') === 'scan') await closeSelfIfOpened();
+      if (new URLSearchParams(location.search).get('efc') === 'scan') {
+        await closeSelfIfOpened();
+        return;
+      }
+      await dailyCheck('epic');      // 用户自己开的 Epic 页：把 Fab 那半边也补上
       return;
     }
 
