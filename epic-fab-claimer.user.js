@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.3.2
+// @version      1.4.0
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -19,6 +19,7 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_notification
+// @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @connect      store-site-backend-static-ipv4.ak.epicgames.com
 // @connect      store.epicgames.com
@@ -43,6 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
+  const VERSION = '1.4.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -51,6 +53,9 @@
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
+    toastEnabled: true,  // 右下角浮窗总开关
+    toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
+    notifyFail: true,    // 领取失败时发系统通知
     dryRun: false,       // 只扫描不点领取
     epicScanHours: 24,   // Epic 自动扫的间隔
     fabScanHours: 6,     // Fab 自动领的间隔
@@ -86,6 +91,12 @@
     if (window.GM && window.GM.openInTab) return window.GM.openInTab(url, o);
     return window.open(url, '_blank');
   }
+  // 失败类通知受设置里「失败时发系统通知」控制；成功类仍直接 gmNotify
+  function notifyFail(text, title) {
+    if (stCache && stCache.notifyFail === false) return;
+    gmNotify(text, title);
+  }
+
   function gmNotify(text, title) {
     try {
       if (has('GM_notification')) window.GM_notification({ text, title: title || '免费领取助手', timeout: 8000 });
@@ -119,8 +130,10 @@
     } catch (e) { /* ignore */ }
     if (ui) ui.refresh();
   }
+  let stCache = null;
   async function settings() {
-    return Object.assign({}, DEF_SETTINGS, await gmGet(K.settings, {}));
+    stCache = normalizeSettings(await gmGet(K.settings, {}));
+    return stCache;
   }
   async function hist(key) {
     const h = await gmGet(key, {});
@@ -180,6 +193,7 @@
         <div class="hd"><span class="dot"></span><b></b><span class="mini">–</span></div>
         <div class="bd">
           <div class="row"><button data-act="scan">立即扫描本轮</button><button data-act="clear">清日志</button></div>
+          <div class="row"><button data-act="openSettings">⚙ 设置</button></div>
           <div class="row"><button data-act="logowned">领过日志：关</button></div>
           <div id="log"></div>
           <div class="hint"></div>
@@ -219,6 +233,7 @@
       await gmSet(K.log, []);
       ui.refresh();
     });
+    root.querySelector('[data-act="openSettings"]').addEventListener('click', () => { openSettings(); });
     root.querySelector('[data-act="logowned"]').addEventListener('click', async () => {
       const st = await settings();
       await gmSet(K.settings, Object.assign({}, st, { logOwned: !st.logOwned }));
@@ -297,6 +312,7 @@
   // 不抢焦点的角落浮窗：只在自身区域吃点击，不遮页面、不弹模态
   function showToast(title, lines, opts) {
     const o = opts || {};
+    if (stCache && stCache.toastEnabled === false) return;   // 设置里关掉就彻底静默
     let el = document.getElementById('efc-toast');
     if (!el) {
       el = document.createElement('div');
@@ -384,7 +400,8 @@
       // 同一天最多主动弹 3 次，别每开一个标签页都糊一脸
       const shown = await gmGet(K.toastShown, {});
       const n = shown.day === dayKey() ? shown.n : 0;
-      if (n < 3) {
+      const cap = Number.isFinite(st.toastMaxPerDay) ? st.toastMaxPerDay : 3;
+      if (n < cap) {
         await gmSet(K.toastShown, { day: dayKey(), n: n + 1 });
         showToast('免费内容检查完毕', summaryLines(d));
       }
@@ -422,7 +439,7 @@
       if (sitesDone(d, st)) {
         const anyBad = (d.epic && (d.epic.failed || []).length) || (d.fab && (d.fab.failed || []).length);
         showToast(anyBad ? '有项目领取失败' : '免费内容检查完毕', summaryLines(d));
-        if (anyBad) gmNotify('有免费内容没领到，点开面板看原因', 'Epic/Fab 领取');
+        if (anyBad) notifyFail('有免费内容没领到，点开面板看原因', 'Epic/Fab 领取');
         return;
       }
       showToast('正在检查免费内容…', [{ text: `${d.epic ? 'Epic 已扫' : 'Epic 扫描中'} · ${d.fab ? 'Fab 已扫' : 'Fab 扫描中'}`, dim: true }], { keep: true });
@@ -660,7 +677,7 @@
         await setHist(K.fabHist, id, { title, state: 'needs-login', at: Date.now() });
         await log(`Fab：401 未授权 —— 登录态失效，本轮停手（${title.slice(0, 20)}）`, 'warn');
         bigBanner('Fab 登录态失效：登录一次后我会自动接着领', 'rgba(200,120,20,.95)');
-        gmNotify('Fab 需要重新登录', 'Fab 领取');
+        notifyFail('Fab 需要重新登录', 'Fab 领取');
         dailyFailed.push({ title, reason: '未登录' });
         break;
       } else {
@@ -855,7 +872,7 @@
       const names = soon.map((g) => g.title).slice(0, 3).join('、');
       await log(`Epic：还有 ${soon.length} 个 48 小时内到期没领到：${names}`, 'warn');
       bigBanner(`⏳ ${names} 限时免费快结束了，正在重试领取`, 'rgba(200,120,20,.95)');
-      gmNotify(`${soon.length} 个限时免费 48h 内到期`, 'Epic 领取提醒');
+      notifyFail(`${soon.length} 个限时免费 48h 内到期`, 'Epic 领取提醒');
     }
     if (st.dryRun) {
       for (const g of todo) await log(`Epic：[仅扫描] 可领 ${g.title}`, 'ok');
@@ -1157,6 +1174,352 @@
     }
   }
 
+  // ══════════════════════════ 设置 UI（v1.4.0）══════════════════════════
+  // 一个独立的 shadow host，任何站点都能开（菜单命令 / 面板按钮都进这里）。
+  // 字段表驱动渲染：加设置只改 SETTINGS_SCHEMA + DEF_SETTINGS，不用碰 DOM 代码。
+  const SETTINGS_SCHEMA = [
+    {
+      section: '总开关',
+      fields: [
+        { k: 'autoEpic', type: 'bool', label: '自动领 Epic 每周免费', hint: '每天首次打开浏览器时扫一次' },
+        { k: 'autoFab', type: 'bool', label: '自动领 Fab 免费资产', hint: '含限时免费（走 0 元购物车结算）' },
+        { k: 'dryRun', type: 'bool', label: '仅扫描，不下单', hint: '只告诉你会领什么，一个都不点' },
+      ],
+    },
+    {
+      section: '每轮上限',
+      fields: [
+        { k: 'maxEpicPerRun', type: 'num', label: 'Epic 每轮最多领', min: 1, max: 10, unit: '个' },
+        { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 50, unit: '个' },
+      ],
+    },
+    {
+      section: '冷却与重试',
+      fields: [
+        { k: 'epicScanHours', type: 'num', label: 'Epic 自动扫间隔', min: 1, max: 168, unit: '小时' },
+        { k: 'fabScanHours', type: 'num', label: 'Fab 自动扫间隔', min: 1, max: 168, unit: '小时' },
+        { k: 'epicRetryMinutes', type: 'num', label: 'Epic 失败重试冷却', min: 10, max: 1440, unit: '分钟', hint: '免费窗口只有一周，别设太大' },
+        { k: 'retryDays', type: 'num', label: 'Fab 失败重试冷却', min: 1, max: 30, unit: '天' },
+      ],
+    },
+    {
+      section: '汇报方式',
+      fields: [
+        { k: 'toastEnabled', type: 'bool', label: '显示右下角浮窗', hint: '关掉就完全静默，只看面板日志' },
+        { k: 'toastMaxPerDay', type: 'num', label: '每天最多主动弹', min: 0, max: 20, unit: '次', hint: '0 = 只在面板里看' },
+        { k: 'notifyFail', type: 'bool', label: '失败时发系统通知' },
+        { k: 'logOwned', type: 'bool', label: '「领过了」也逐条写日志', hint: '默认只汇总计数' },
+      ],
+    },
+  ];
+
+  // 存进去的东西可能是旧版本、手改的、或从别处导入的字符串 —— 一律过一遍这里
+  function normalizeSettings(raw) {
+    const out = Object.assign({}, DEF_SETTINGS);
+    const fields = {};
+    for (const sec of SETTINGS_SCHEMA) for (const f of sec.fields) fields[f.k] = f;
+    for (const k of Object.keys(DEF_SETTINGS)) {
+      const v = raw && raw[k];
+      if (v === undefined || v === null) continue;
+      const f = fields[k];
+      if (!f) continue;
+      if (f.type === 'bool') out[k] = !!v;
+      else {
+        const n = Number(v);
+        if (!Number.isFinite(n)) continue;
+        out[k] = Math.min(f.max, Math.max(f.min, Math.round(n)));
+      }
+    }
+    return out;
+  }
+
+  let setUi = null;   // { host, root, body, io, msg, stat }
+
+  function esc(s) {
+    return String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
+  }
+
+  const SET_CSS = `
+    :host { all: initial; }
+    * { box-sizing: border-box; }
+    .mask { position: fixed; inset: 0; background: rgba(8,9,12,.55); display: flex;
+            align-items: center; justify-content: center; padding: 24px; }
+    .card { width: 480px; max-width: 94vw; max-height: 86vh; display: flex; flex-direction: column;
+            font: 12.5px/1.6 "Microsoft YaHei", system-ui, sans-serif; color: #e8e9ec;
+            background: #16181e; border: 1px solid rgba(255,255,255,.14); border-radius: 12px;
+            box-shadow: 0 18px 50px rgba(0,0,0,.6); overflow: hidden; }
+    .hd { display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+          background: linear-gradient(90deg, rgba(255,90,140,.26), rgba(120,90,255,.2)); }
+    .hd b { flex: 1; font-size: 13px; font-weight: 600; }
+    .hd .ver { font-size: 10.5px; opacity: .65; }
+    .hd .x { cursor: pointer; opacity: .65; padding: 0 2px; font-size: 14px; }
+    .hd .x:hover { opacity: 1; }
+    .bd { padding: 4px 14px 10px; overflow: auto; }
+    .sec { padding: 10px 0 8px; border-bottom: 1px solid rgba(255,255,255,.07); }
+    .sec:last-child { border-bottom: 0; }
+    .sec-t { font-size: 11px; letter-spacing: .04em; opacity: .55; margin-bottom: 6px; }
+    .row { display: flex; align-items: center; gap: 10px; padding: 4px 0; cursor: pointer; }
+    .row .lab { flex: 1; min-width: 0; }
+    .row .lab em { display: block; font-style: normal; font-size: 10.5px; opacity: .5; }
+    input[type=checkbox] { position: absolute; opacity: 0; width: 0; height: 0; margin: 0; }
+    .sw { flex: 0 0 auto; width: 36px; height: 20px; border-radius: 999px; position: relative;
+      background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.18);
+      cursor: pointer; transition: background .16s, border-color .16s; }
+    .sw::after { content: ''; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px;
+      border-radius: 50%; background: #9aa0ad; transition: transform .16s, background .16s; }
+    input[type=checkbox]:checked + .sw { background: #2f9e63; border-color: #6ee7a8; }
+    input[type=checkbox]:checked + .sw::after { transform: translateX(16px); background: #fff; }
+    input[type=checkbox]:focus-visible + .sw { outline: 2px solid #9aa4ff; outline-offset: 2px; }
+    .num { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+    .num input { width: 72px; font: inherit; font-size: 12px; color: #e8e9ec; text-align: right;
+      background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.16);
+      border-radius: 6px; padding: 3px 6px; }
+    .num em { font-style: normal; font-size: 10.5px; opacity: .55; min-width: 26px; }
+    .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+    button { font: inherit; font-size: 11.5px; color: #e8e9ec; background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.16); border-radius: 7px; padding: 5px 10px; cursor: pointer; }
+    button:hover { background: rgba(255,255,255,.17); }
+    button.danger { color: #ff9a9a; border-color: rgba(255,120,120,.35); }
+    button.danger:hover { background: rgba(255,120,120,.18); }
+    textarea { width: 100%; height: 88px; margin-top: 6px; resize: vertical; font: 11px/1.5 ui-monospace, Consolas, monospace;
+      color: #d7d8dc; background: rgba(0,0,0,.35); border: 1px solid rgba(255,255,255,.14);
+      border-radius: 7px; padding: 6px 8px; }
+    .stat { font-size: 11px; opacity: .75; white-space: pre-wrap; word-break: break-all; }
+    .ft { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-top: 1px solid rgba(255,255,255,.09); }
+    .ft .msg { flex: 1; font-size: 11px; opacity: .6; }
+    .ft .msg.ok { color: #8fe3a5; opacity: 1; }
+    .ft .msg.bad { color: #ff9a9a; opacity: 1; }
+  `;
+
+  function fieldHtml(f, st) {
+    const v = st[f.k];
+    if (f.type === 'bool') {
+      return `<label class="row"><span class="lab">${esc(f.label)}${f.hint ? `<em>${esc(f.hint)}</em>` : ''}</span>`
+        + `<input type="checkbox" data-k="${esc(f.k)}"${v ? ' checked' : ''}><i class="sw"></i></label>`;
+    }
+    return `<label class="row"><span class="lab">${esc(f.label)}${f.hint ? `<em>${esc(f.hint)}</em>` : ''}</span>`
+      + `<span class="num"><input type="number" data-k="${esc(f.k)}" value="${esc(v)}"`
+      + ` min="${f.min}" max="${f.max}" step="1"><em>${esc(f.unit || '')}</em></span></label>`;
+  }
+
+  function bodyHtml(st) {
+    const secs = SETTINGS_SCHEMA.map((sec) => `<div class="sec"><div class="sec-t">${esc(sec.section)}</div>`
+      + sec.fields.map((f) => fieldHtml(f, st)).join('') + '</div>').join('');
+    return secs + `
+      <div class="sec"><div class="sec-t">立刻执行</div><div class="acts">
+        <button data-act="scanEpic">扫 Epic</button>
+        <button data-act="scanFab">扫 Fab</button>
+        <button data-act="scanBoth">两边都扫</button>
+      </div></div>
+      <div class="sec"><div class="sec-t">数据</div>
+        <div class="acts">
+          <button data-act="export">导出设置</button>
+          <button data-act="apply">应用下面这段 JSON</button>
+          <button data-act="reset">恢复默认</button>
+        </div>
+        <textarea id="io" spellcheck="false" placeholder="点「导出设置」把当前配置写到这里；也可以粘一段 JSON 进来再点「应用」。"></textarea>
+        <div class="acts" style="margin-top:6px">
+          <button data-act="clearDaily">清空今日汇总</button>
+          <button data-act="clearLog">清空日志</button>
+          <button data-act="clearHist" class="danger">清空领取历史</button>
+        </div>
+      </div>
+      <div class="sec"><div class="sec-t">状态</div><div class="stat" id="stat">读取中…</div></div>`;
+  }
+
+  async function statText() {
+    const [le, lf, he, hf, logs, daily] = await Promise.all([
+      gmGet(K.lastEpicScan, 0), gmGet(K.lastFabScan, 0),
+      hist(K.epicHist), hist(K.fabHist), gmGet(K.log, []), gmGet(K.daily, null),
+    ]);
+    const fmt = (ms) => (ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '还没跑过');
+    const lines = [
+      `Epic 上次扫描：${fmt(le)}（历史 ${Object.keys(he).length} 条）`,
+      `Fab 上次扫描：${fmt(lf)}（历史 ${Object.keys(hf).length} 条）`,
+      `日志：${(logs || []).length} 条`,
+    ];
+    if (daily && daily.day) {
+      const e = daily.epic ? `Epic ${daily.epic.done ? '已完成' : '进行中'}` : 'Epic 未跑';
+      const f = daily.fab ? `Fab ${daily.fab.done ? '已完成' : '进行中'}` : 'Fab 未跑';
+      lines.push(`今日（${daily.day}）：${e} · ${f}`);
+    }
+    return lines.join('\n');
+  }
+
+  async function openSettings() {
+    toastHide();          // 设置界面打开时先把角落浮窗收起来，别叠在一起
+    if (setUi) {
+      setUi.host.style.display = 'block';
+      await renderSettings();
+      return;
+    }
+    const host = document.createElement('div');
+    host.id = 'efc-settings-host';
+    host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:block;';
+    document.documentElement.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = `<style>${SET_CSS}</style>
+      <div class="mask"><div class="card">
+        <div class="hd"><b>Epic/Fab 领取助手 · 设置</b><span class="ver"></span><span class="x" title="关闭（Esc）">✕</span></div>
+        <div class="bd"></div>
+        <div class="ft"><span class="msg">改动自动保存</span><button data-act="close">关闭</button></div>
+      </div></div>`;
+    setUi = {
+      host,
+      root,
+      body: root.querySelector('.bd'),
+      msg: root.querySelector('.ft .msg'),
+      card: root.querySelector('.card'),
+    };
+    root.querySelector('.ver').textContent = 'v' + VERSION;
+    const close = () => { host.style.display = 'none'; };
+    root.querySelector('.hd .x').addEventListener('click', close);
+    root.querySelector('[data-act="close"]').addEventListener('click', close);
+    root.querySelector('.mask').addEventListener('click', (e) => {
+      if (e.target === root.querySelector('.mask')) close();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && host.style.display !== 'none') close();
+    });
+
+    // 改了就存：不设"保存"按钮，省得忘了点
+    setUi.body.addEventListener('change', async (e) => {
+      const t = e.target;
+      const k = t && t.getAttribute && t.getAttribute('data-k');
+      if (!k) return;
+      const f = SETTINGS_SCHEMA.flatMap((s) => s.fields).find((x) => x.k === k);
+      if (!f) return;
+      const st = await settings();
+      const val = f.type === 'bool' ? !!t.checked
+        : Math.min(f.max, Math.max(f.min, Math.round(Number(t.value) || f.min)));
+      if (f.type === 'num' && String(val) !== t.value) t.value = val;
+      await gmSet(K.settings, Object.assign({}, st, { [k]: val }));
+      await flash(`已保存：${f.label} = ${f.type === 'bool' ? (val ? '开' : '关') : val + (f.unit || '')}`, 'ok');
+      if (ui) ui.refresh();
+      if (k === 'toastEnabled' || k === 'logOwned') await api.refreshStats();
+    });
+
+    setUi.body.addEventListener('click', async (e) => {
+      const act = e.target && e.target.getAttribute && e.target.getAttribute('data-act');
+      if (!act) return;
+      await onAction(act);
+    });
+
+    await renderSettings();
+  }
+
+  async function renderSettings() {
+    if (!setUi) return;
+    const st = await settings();
+    const scrollTop = setUi.body.scrollTop;
+    setUi.body.innerHTML = bodyHtml(st);
+    setUi.body.scrollTop = scrollTop;
+    await api.refreshStats();
+  }
+
+  // 页面代码里到处用 flash(...)，这里给个短名字别名（api 还没建好时也不能炸）
+  const flash = (text, level) => (api ? api.flash(text, level) : Promise.resolve());
+
+  const api = {
+    async refreshStats() {
+      if (!setUi) return;
+      const el = setUi.root.querySelector('#stat');
+      if (el) el.textContent = await statText();
+    },
+    async flash(text, level) {
+      if (!setUi) return;
+      const m = setUi.msg;
+      m.textContent = text;
+      m.className = 'msg ' + (level || '');
+      clearTimeout(api._t);
+      api._t = setTimeout(() => {
+        if (setUi && setUi.msg === m) { m.textContent = '改动自动保存'; m.className = 'msg'; }
+      }, 2600);
+    },
+  };
+
+  async function onAction(act) {
+    if (act === 'close') { setUi.host.style.display = 'none'; return; }
+
+    if (act === 'scanEpic' || act === 'scanBoth') {
+      await flash('已开始扫 Epic —— 进度看面板日志');
+      if (location.hostname.endsWith('epicgames.com')) epicScan(true);
+      else gmOpenTab(`${STORE}/zh-CN/free-games?efc=scan`, { active: true });
+    }
+    if (act === 'scanFab' || act === 'scanBoth') {
+      await flash('已开始扫 Fab —— 进度看面板日志');
+      if (location.hostname.endsWith('fab.com')) fabRun(true);
+      else gmOpenTab(`${FAB_HOME}/limited-time-free?efc=scan`, { active: true });
+    }
+
+    if (act === 'export') {
+      const st = await settings();
+      setUi.root.querySelector('#io').value = JSON.stringify(st, null, 2);
+      await flash('已导出到下面的文本框，可以直接复制', 'ok');
+    }
+
+    if (act === 'apply') {
+      const raw = (setUi.root.querySelector('#io').value || '').trim();
+      if (!raw) { await flash('先把 JSON 粘进文本框', 'bad'); return; }
+      let obj;
+      try {
+        obj = JSON.parse(raw);
+      } catch (err) {
+        await flash(`JSON 解析失败：${err.message}`, 'bad');
+        return;
+      }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+        await flash('要一个 JSON 对象，例如 {"maxFabPerRun": 5}', 'bad');
+        return;
+      }
+      await gmSet(K.settings, normalizeSettings(obj));
+      await renderSettings();
+      await flash('已应用并生效', 'ok');
+      if (ui) ui.refresh();
+      return;
+    }
+
+    if (act === 'reset') {
+      if (!window.confirm('恢复全部默认设置？（不影响领取历史）')) return;
+      await gmSet(K.settings, {});
+      await renderSettings();
+      await flash('已恢复默认', 'ok');
+      if (ui) ui.refresh();
+      return;
+    }
+
+    if (act === 'clearLog') {
+      await gmSet(K.log, []);
+      await renderSettings();
+      await flash('日志已清空', 'ok');
+      if (ui) ui.refresh();
+      return;
+    }
+    if (act === 'clearHist') {
+      if (!window.confirm('清空领取历史？\n清了之后脚本会把你能看到的免费条目重新扫一遍（已在库的会靠 Fab 库搜索识别出来，不会重复占库）。')) return;
+      await gmSet(K.epicHist, {});
+      await gmSet(K.fabHist, {});
+      await renderSettings();
+      await flash('领取历史已清空', 'ok');
+      return;
+    }
+    if (act === 'clearDaily') {
+      await gmSet(K.daily, null);
+      await gmSet(K.toastOff, '');
+      await gmSet(K.toastShown, {});
+      await renderSettings();
+      await flash('今日汇总已清空（下次打开页面会重新检查）', 'ok');
+    }
+  }
+  function mountSettingsMenu() {
+    try {
+      if (typeof window.GM_registerMenuCommand === 'function') {
+        window.GM_registerMenuCommand('⚙ 脚本设置', () => { openSettings(); });
+      }
+    } catch (e) { /* 有的管理器不让注册，面板按钮兜底 */ }
+  }
+
+
   // ══════════════════════════════ 入口 ══════════════════════════════
   function parseArgs() {
     const q = new URLSearchParams(location.search);
@@ -1207,7 +1570,9 @@
   }
 
   // 给离线自测留出口（node 里 stub 一个 window 就能验纯逻辑，不影响正常使用）
-  window.__efcInternals = { freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines };
+  window.__efcInternals = { DEF_SETTINGS, SETTINGS_SCHEMA, normalizeSettings, openSettings, VERSION, freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines };
+
+  mountSettingsMenu();
 
   // 单页只跑一次；Epic 站内路由切换不重复触发
   if (window.__efcBooted) return;

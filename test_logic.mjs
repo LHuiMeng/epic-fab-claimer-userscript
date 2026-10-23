@@ -168,3 +168,51 @@ console.log('CLAIM-DETECT PASS');
   console.log(`${ok ? 'PASS' : 'FAIL'} dayKey() = ${k}`);
   if (!ok) process.exit(1);
 }
+
+// ── 设置面板的字段表与默认值必须对齐（漏一个就是「设置里改不到」）──
+{
+  const def = I.DEF_SETTINGS || {};
+  const schema = I.SETTINGS_SCHEMA || [];
+  const keys = schema.flatMap((s) => s.fields.map((f) => f.k));
+  const missing = Object.keys(def).filter((k) => !keys.includes(k));
+  const extra = keys.filter((k) => !(k in def));
+  let bad = 0;
+  if (missing.length) { bad++; console.log(`FAIL 默认项没进设置面板: ${missing.join(',')}`); }
+  if (extra.length) { bad++; console.log(`FAIL 面板上有默认值里没有的键: ${extra.join(',')}`); }
+  if (new Set(keys).size !== keys.length) { bad++; console.log('FAIL 面板里有重复键'); }
+  for (const sec of schema) {
+    for (const f of sec.fields) {
+      if (!['bool', 'num'].includes(f.type)) { bad++; console.log(`FAIL 未知类型 ${f.k}: ${f.type}`); }
+      if (f.type === 'num' && !(Number.isFinite(f.min) && Number.isFinite(f.max) && f.min < f.max)) {
+        bad++; console.log(`FAIL ${f.k} 的 min/max 不合法`);
+      }
+      if (!f.label) { bad++; console.log(`FAIL ${f.k} 没有标签`); }
+    }
+  }
+  if (!bad) console.log(`PASS 设置面板覆盖全部 ${Object.keys(def).length} 个默认项（${schema.length} 组）`);
+  if (bad) process.exit(1);
+}
+
+// ── normalizeSettings：脏值要能兜住（导入/手改/旧版本）──
+{
+  const N = I.normalizeSettings;
+  const cases = [
+    ['数字字符串被转成数字', { maxFabPerRun: '7' }, (r) => r.maxFabPerRun === 7],
+    ['超过上限被夹住', { maxFabPerRun: 9999 }, (r) => r.maxFabPerRun === 50],
+    ['低于下限被夹住', { toastMaxPerDay: -5 }, (r) => r.toastMaxPerDay === 0],
+    ['小数被取整', { epicRetryMinutes: 45.7 }, (r) => r.epicRetryMinutes === 46],
+    ['布尔按真值取', { autoEpic: 'yes', logOwned: 0 }, (r) => r.autoEpic === true && r.logOwned === false],
+    ['非法数字保持默认', { retryDays: 'abc' }, (r) => r.retryDays === 7],
+    ['未知键被丢掉', { notARealKey: 1 }, (r) => !('notARealKey' in r)],
+    ['空值不覆盖默认', { maxEpicPerRun: null }, (r) => r.maxEpicPerRun === 3],
+  ];
+  let bad = 0;
+  for (const [name, raw, ok] of cases) {
+    const r = N(raw);
+    const pass = ok(r);
+    if (!pass) bad++;
+    console.log(`${pass ? 'PASS' : 'FAIL'} normalizeSettings：${name} → ${JSON.stringify(r).slice(0, 90)}`);
+  }
+  if (bad) { console.error(`NORMALIZE FAIL: ${bad} 项`); process.exit(1); }
+  console.log('NORMALIZE PASS');
+}
