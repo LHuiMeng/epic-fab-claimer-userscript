@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.3.1
+// @version      1.3.2
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -50,6 +50,7 @@
     maxFabPerRun: 10,    // 每轮最多领 10 个资产
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
+    logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
     dryRun: false,       // 只扫描不点领取
     epicScanHours: 24,   // Epic 自动扫的间隔
     fabScanHours: 6,     // Fab 自动领的间隔
@@ -179,6 +180,7 @@
         <div class="hd"><span class="dot"></span><b></b><span class="mini">–</span></div>
         <div class="bd">
           <div class="row"><button data-act="scan">立即扫描本轮</button><button data-act="clear">清日志</button></div>
+          <div class="row"><button data-act="logowned">领过日志：关</button></div>
           <div id="log"></div>
           <div class="hint"></div>
         </div>
@@ -201,6 +203,8 @@
         logEl.scrollTop = logEl.scrollHeight;
         const st = await settings();
         hintEl.textContent = `${location.hostname} · Epic ${st.autoEpic ? '开' : '关'} / Fab ${st.autoFab ? '开' : '关'}${st.dryRun ? ' · 仅扫描' : ''}`;
+        const btnOwned = root.querySelector('[data-act="logowned"]');
+        if (btnOwned) btnOwned.textContent = `领过日志：${st.logOwned ? '开' : '关'}`;
       },
       busy(on, warn) {
         dot.className = 'dot' + (warn ? ' warn' : (on ? ' busy' : ''));
@@ -213,6 +217,11 @@
     });
     root.querySelector('[data-act="clear"]').addEventListener('click', async () => {
       await gmSet(K.log, []);
+      ui.refresh();
+    });
+    root.querySelector('[data-act="logowned"]').addEventListener('click', async () => {
+      const st = await settings();
+      await gmSet(K.settings, Object.assign({}, st, { logOwned: !st.logOwned }));
       ui.refresh();
     });
     ui.refresh();
@@ -542,7 +551,7 @@
         await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
         dailyOwned.push(title);
         ownedCount++;
-        await log(`Fab：${title.slice(0, 26)} 已在库里（领过了），跳过`);
+        if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 已在库里（领过了），跳过`);
         continue;
       }
       let upgrading = false;
@@ -830,7 +839,9 @@
     for (const g of games) {
       if (todo.includes(g)) continue;
       const p = h[g.id] || {};
-      await log(`Epic：${g.title.slice(0, 24)} 跳过（${p.state}${p.verified ? '·已验证' : ''}，${Math.max(1, Math.round((cool - (Date.now() - (p.at || 0))) / 60000))} 分钟后重试）`);
+      if (st.logOwned) {
+        await log(`Epic：${g.title.slice(0, 24)} 跳过（${p.state}${p.verified ? '·已验证' : ''}，${Math.max(1, Math.round((cool - (Date.now() - (p.at || 0))) / 60000))} 分钟后重试）`);
+      }
     }
     if (!todo.length) {
       await log('Epic：本周的都处理过了，没有要开的');

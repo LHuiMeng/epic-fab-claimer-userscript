@@ -138,5 +138,21 @@ const lines = I.summaryLines(daily).map((l) => l.text).join(' | ');
 check('悬浮窗文案分得清「领到」和「领过了」',
   lines.includes('领到 1 个') && lines.includes('早就在库里'), lines);
 
+// ── 领过日志开关：默认关（不刷屏），打开后才写 ──
+{
+  const logs = store.get('efc:log') || [];
+  const hasOwnedLine = logs.some((l) => String(l.msg || '').includes('已在库里（领过了）'));
+  check('默认不写「领过了」日志', hasOwnedLine === false, `日志条数 ${logs.length}`);
+
+  store.set('efc:fab:history', {});
+  store.set('efc:settings', { logOwned: true });
+  store.set('efc:log', []);
+  await I.fabRun(true);
+  const logs2 = store.get('efc:log') || [];
+  check('开关打开后写「领过了」日志',
+    logs2.some((l) => String(l.msg || '').includes('已在库里（领过了）')),
+    logs2.map((l) => l.msg).join(' / ').slice(0, 160));
+}
+
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }
 console.log('\nFAB-FLOW PASS');
