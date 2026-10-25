@@ -6,9 +6,9 @@
 ## 安装
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)（Firefox 可用 Violentmonkey）
-2. 点这里安装：[**epic-fab-claimer.user.js**](https://gh-proxy.com/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js)
+2. 点这里安装：[**epic-fab-claimer.user.js**](https://ghfast.top/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js)
 
-   > 更新地址走 **gh-proxy.com 直通 raw**（备用：ghfast.top、jsDelivr）：`raw.githubusercontent.com` 在部分网络下直接 `Failed to fetch`（实测 9ms 被拒），
+   > 更新地址走 **ghfast.top 直通 raw**（备用：gh-proxy.com、jsDelivr）：`raw.githubusercontent.com` 在部分网络下直接 `Failed to fetch`（实测 9ms 被拒），
    > 用 raw 当 `@updateURL` 等于自动更新从来没成功过 —— 表现就是「脚本一直是老版本、也没有设置界面」。
    > jsDelivr 的 `@main` 分支文件有**最长 12 小时缓存**（实测推完半小时还发旧版），所以只当备用镜像，
    > 菜单里留了「🔁 备用镜像更新」一键切换。
@@ -249,6 +249,7 @@ node test_logic.mjs     # 用 free_sample.json（真实接口快照）验免费�
 
 | 版本 | 要点 |
 |---|---|
+| 1.6.3 | 主更新通道定在 ghfast.top（推送后立刻可取），备用 gh-proxy.com / jsDelivr |
 | 1.6.2 | 更新通道换成 gh-proxy.com（实测推送后立刻拿到新版），另给 ghfast.top / jsDelivr 两个备用入口 |
 | 1.6.1 | 更新通道换成 ghproxy 直通 raw（jsDelivr 分支缓存 12h 导致「仓库明明更新了、脚本还是老版」）；菜单加备用镜像入口 |
 | 1.6.0 | Fab 领取改**并发**（`fabConcurrency`，默认 3，实测快 3 倍以上）；「打包(bundle)」类条目也改走 0 元购物车结算 |
