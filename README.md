@@ -6,11 +6,12 @@
 ## 安装
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)（Firefox 可用 Violentmonkey）
-2. 点这里安装：[**epic-fab-claimer.user.js**](https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js)
+2. 点这里安装：[**epic-fab-claimer.user.js**](https://ghproxy.net/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js)
 
-   > 安装 / 更新地址用 **jsDelivr**，不用 GitHub raw：`raw.githubusercontent.com` 在部分网络下直接 `Failed to fetch`（实测 9ms 被拒），
-   > 用 raw 的 `@updateURL` 等于自动更新从来没成功过 —— 表现就是「脚本一直是老版本、也没有设置界面」。
-   > 三个镜像都能用：`fastly.jsdelivr.net` / `gcore.jsdelivr.net` / `cdn.jsdelivr.net`。
+   > 更新地址走 **ghproxy 直通 raw**：`raw.githubusercontent.com` 在部分网络下直接 `Failed to fetch`（实测 9ms 被拒），
+   > 用 raw 当 `@updateURL` 等于自动更新从来没成功过 —— 表现就是「脚本一直是老版本、也没有设置界面」。
+   > jsDelivr 的 `@main` 分支文件有**最长 12 小时缓存**（实测推完半小时还发旧版），所以只当备用镜像，
+   > 菜单里留了「🔁 备用镜像更新」一键切换。
 3. 先在浏览器里登录一次 Epic 和 Fab —— 脚本只用你已有的登录态
 
 > 装完**记得看面板标题**：写成 `Fab 免费资产 · v1.5.2` 才是新版。
@@ -248,6 +249,7 @@ node test_logic.mjs     # 用 free_sample.json（真实接口快照）验免费�
 
 | 版本 | 要点 |
 |---|---|
+| 1.6.1 | 更新通道换成 ghproxy 直通 raw（jsDelivr 分支缓存 12h 导致「仓库明明更新了、脚本还是老版」）；菜单加备用镜像入口 |
 | 1.6.0 | Fab 领取改**并发**（`fabConcurrency`，默认 3，实测快 3 倍以上）；「打包(bundle)」类条目也改走 0 元购物车结算 |
 | 1.5.2 | 启动日志直接提示设置入口在哪 |
 | 1.5.1 | 更新地址从 GitHub raw 换成 jsDelivr（raw 在部分网络被墙，导致自动更新从未生效）；面板标题和启动日志都带版本号；菜单加「检查更新 / 重装」 |
