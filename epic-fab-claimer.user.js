@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.5.1
+// @version      1.5.2
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.5.1';
+  const VERSION = '1.5.2';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -1584,6 +1584,7 @@
   async function boot() {
     const host = location.hostname;
     await log(`Epic/Fab 助手 v${VERSION} 已加载（${host}）`);
+    await log('设置：Tampermonkey 菜单 → ⚙ 脚本设置（Epic/Fab 页上的面板里也有「⚙ 设置」按钮）');
     const args = parseArgs();
 
     // 领取标签页（我们自己开的）
