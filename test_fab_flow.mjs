@@ -272,5 +272,50 @@ check('悬浮窗文案分得清「领到」和「领过了」',
     String(calls3.filter((c) => c.includes('add-to-library')).length));
 }
 
+// ── 场景 C：已有个人版、专业版仍要钱 → 必须报出来（1.7.2 修的就是这条静默分支）──
+{
+  const PRO_ID = 'pr0pr0pr-0000-0000-0000-00000000beef';
+  const captured = [];
+  const baseFetch = sandbox.fetch;
+  const rC = (status, body, kind = 'json') => ({
+    ok: status >= 200 && status < 300, status,
+    json: async () => (kind === 'json' ? body : JSON.parse(body)),
+    text: async () => (kind === 'json' ? JSON.stringify(body) : body),
+  });
+  sandbox.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === '/i/users/me') return rC(200, { displayName: 'RuinDream' });
+    if (u.startsWith('/i/library/search')) return rC(200, { results: [], cursors: { next: null } });
+    if (u.includes('min_discount_percentage=100')) return rC(200, { results: [], cursors: { next: null } });
+    if (u.includes('is_free=1')) {
+      return rC(200, { results: [{ uid: PRO_ID, title: 'Paid Pro Asset' }], cursors: { next: null } });
+    }
+    if (u === `/i/listings/${PRO_ID}`) {
+      return rC(200, { title: 'Paid Pro Asset', licenses: [
+        { name: '个人', slug: 'personal', offerId: 'OFFER-P', listingLicenseId: 'LL-P',
+          priceTier: { price: 0, discountedPrice: 0, effectiveDiscountPercentage: 0 } },
+        { name: '专业', slug: 'professional', offerId: 'OFFER-PRO', listingLicenseId: 'LL-PRO',
+          priceTier: { price: 29.99, discountedPrice: 29.99 } },
+      ] });
+    }
+    return rC(404, { detail: 'not stubbed ' + u });
+  };
+  const realConsole = sandbox.console;
+  sandbox.console = { log: (...a) => captured.push(a.join(' ')), warn: () => {}, error: () => {} };
+  store.set('efc:settings', {});
+  store.set('efc:fab:history', { [PRO_ID]: { title: 'Paid Pro Asset', state: 'claimed', license: '个人', at: Date.now() } });
+  store.delete('efc:daily');
+  await I.fabRun(true);
+  sandbox.console = realConsole;
+  sandbox.fetch = baseFetch;
+
+  const dailyC = (store.get('efc:daily') || {}).fab || {};
+  const text = captured.join('\n');
+  check('专业版仍要钱被计入汇总', dailyC.proStillPaid === 1, JSON.stringify(dailyC).slice(0, 140));
+  check('专业版仍要钱写了明细日志', /专业版仍要钱（本轮第 1 个）/.test(text), text.slice(-260));
+  check('结束行点明该类跳过数量', /专业版仍要钱 1 个/.test(text), text.slice(-260));
+  check('已有个人版没被重复下单', !text.includes('add-to-library'), text.slice(-200));
+}
+
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }
 console.log('\nFAB-FLOW PASS');

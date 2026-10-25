@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.7.1
+// @version      1.7.2
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.7.1';
+  const VERSION = '1.7.2';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -616,6 +616,7 @@
     let done = 0;
     let ownedCount = 0;
     let noTierCount = 0;
+    let proStillPaid = 0;   // 「已有个人版、专业版仍要钱」被静默跳过的条数（必须报出来，否则 180→5 看起来像坏了）
     const dailyClaimed = [];
     const dailyOwned = [];
     const dailyFailed = [];
@@ -694,6 +695,13 @@
           title, state: 'claimed', at: prev.at || Date.now(),
           offer: prev.offer, license: prev.license, proCheckedAt: Date.now(),
         });
+        proStillPaid++;
+        // 前 3 条 + 每 20 条打一次明细，并把计数刷进进度条：这条分支以前是完全静默的，
+        // 180 个待处理里 175 个走这里，面板却只写「新领 5 个」，看起来像脚本没干活。
+        if (proStillPaid <= 3 || proStillPaid % 20 === 0) {
+          await log(`Fab：${title.slice(0, 26)} 已有个人版，专业版仍要钱（本轮第 ${proStillPaid} 个）`);
+        }
+        progSet({ proStillPaid });
         return;
       }
       if (st.dryRun) {
@@ -766,6 +774,7 @@
 
     let nextIdx = 0;
     let inFlight = 0;
+    let handled = 0;
     async function worker() {
       while (!authFailStop && done + inFlight < st.maxFabPerRun) {
         const i = nextIdx++;
@@ -773,6 +782,7 @@
         inFlight++;
         try {
           await claimOne(todo[i]);
+          handled++;
         } finally {
           inFlight--;
         }
@@ -781,12 +791,19 @@
     }
     await Promise.all(Array.from({ length: conc }, () => worker()));
 
-    progEnd(`完成：领到 ${done} 个 · 已在库 ${ownedCount} · 无免费档 ${noTierCount} · 失败 ${dailyFailed.length}`);
-    await log(`Fab：本轮结束 —— 新领 ${done} 个 / 已在库 ${ownedCount} 个 / 无免费档 ${noTierCount} 个 / 失败 ${dailyFailed.length} 个`);
+    progEnd(`完成：领到 ${done} 个 · 已在库 ${ownedCount} · 专业版仍要钱 ${proStillPaid} · 无免费档 ${noTierCount} · 失败 ${dailyFailed.length}`);
+    await log(`Fab：本轮结束 —— 新领 ${done} 个 / 已在库 ${ownedCount} 个 / 专业版仍要钱 ${proStillPaid} 个 / 无免费档 ${noTierCount} 个 / 失败 ${dailyFailed.length} 个`);
+    // 「需要处理 180 个，却只领到 5 个」这种困惑要能自答：把「跑完了」和「被配额截断」分开写。
+    if (handled < todo.length) {
+      const why = authFailStop ? '登录态失效提前停手' : `受「Fab 每轮最多领」= ${st.maxFabPerRun} 限制`;
+      await log(`Fab：本轮只处理了 ${handled}/${todo.length} 个待处理条目（${why}），剩余 ${todo.length - handled} 个下次继续`, 'warn');
+    } else if (proStillPaid > 0) {
+      await log(`Fab：${todo.length} 个待处理全部查完，其中 ${proStillPaid} 个已有个人版且专业版仍要钱（按规则不重复领）`);
+    }
     if (done) gmNotify(`本轮领取 ${done} 个 Fab 免费资产`, 'Fab 领取完成');
     await dailyPatch('fab', {
       done: true, listed: items.length, claimed: dailyClaimed,
-      owned: dailyOwned, ownedCount, noTierCount, failed: dailyFailed,
+      owned: dailyOwned, ownedCount, noTierCount, proStillPaid, failed: dailyFailed,
     });
     ui.busy(false);
   }
