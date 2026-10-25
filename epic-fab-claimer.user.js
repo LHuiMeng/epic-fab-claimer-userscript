@@ -53,7 +53,7 @@
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
-    fabListPages: 10,    // Fab 免费列表翻几页（每页 24 条）
+    fabListPages: 20,    // Fab 免费列表翻几页（每页 24 条；Fab 上免费资产有 900+ 条）
     libPages: 20,        // 拉库时翻几页（每页 24 条），用于判断"已在库"
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
