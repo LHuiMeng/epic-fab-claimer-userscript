@@ -261,7 +261,17 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   store.set('efc:fab:history', {});
   store.set('efc:settings', { fabConcurrency: 4, maxFabPerRun: 5 });
   store.set('efc:log', []);
+  const logs3 = [];
+  const realConsole3 = sandbox.console;
+  sandbox.console = { log: (...a) => logs3.push(a.join(' ')), warn: () => {}, error: () => {} };
   await I.fabRun(true);
+  sandbox.console = realConsole3;
+  const logText3 = logs3.join('\n');
+  // 主人明确要求「领了谁就发出来」：每一条领到的都必须带完整标题，不能只在第 1/2/10 个报
+  check('领到的 5 个逐条报了完整标题',
+    ['Free Item 1', 'Free Item 2', 'Free Item 3', 'Free Item 4', 'Free Item 5']
+      .every((t) => logText3.includes(t)),
+    logText3.split('\n').filter((l) => l.includes('已领')).join(' | '));
 
   const daily3 = (store.get('efc:daily') || {}).fab || {};
   const claimed3 = daily3.claimed || [];

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.7.2
+// @version      1.7.3
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.7.2';
+  const VERSION = '1.7.3';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -127,16 +127,20 @@
   }
 
   // ────────────────────────────── 日志 / 设置 ──────────────────────────────
+  let _lastRefresh = 0;
   async function log(msg, level) {
     const line = `${new Date().toLocaleTimeString('zh-CN', { hour12: false })} ${msg}`;
     console.log('[EFC]', msg);
     try {
       const arr = await gmGet(K.log, []);
       arr.push({ t: Date.now(), msg, level: level || 'info' });
-      while (arr.length > 200) arr.shift();
+      // 领到谁就报谁之后，一轮几百条领取记录会自己把日志挤掉，环状上限放大到 500
+      while (arr.length > 500) arr.shift();
       await gmSet(K.log, arr);
     } catch (e) { /* ignore */ }
-    if (ui) ui.refresh();
+    // 逐条报领取时日志刷得很快，重绘按 150ms 节流，免得一轮几百条把面板拖卡
+    const now = Date.now();
+    if (ui && now - _lastRefresh > 150) { _lastRefresh = now; ui.refresh(); }
   }
   let stCache = null;
   async function settings() {
@@ -752,10 +756,8 @@
         lib.set.add(normT(title));
         done++;
         progSet({ done: done + dailyFailed.length, claimed: done, failed: dailyFailed.length });
-        // 明细每 10 个记一条就够了，进度看上面那条线
-        if (done <= 2 || done % 10 === 0) {
-          await log(`Fab：已领 ${done} 个（最近：${title.slice(0, 24)}〔${tierLabel}〕）`, 'ok');
-        }
+        // 领到谁就报谁：每一条都写完整标题，不做「每 10 个才报一次」的压缩
+        await log(`Fab：已领 ${done} 个 · ${title}〔${tierLabel}〕`, 'ok');
       } else if (authFail) {
         // 401 = 这个会话没登录/已过期，不是这一条的问题，别再拿后面的条目继续撞
         await setHist(K.fabHist, id, { title, state: 'needs-login', at: Date.now() });
