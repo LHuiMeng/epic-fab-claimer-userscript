@@ -13,6 +13,10 @@
    > 三个镜像都能用：`fastly.jsdelivr.net` / `gcore.jsdelivr.net` / `cdn.jsdelivr.net`。
 3. 先在浏览器里登录一次 Epic 和 Fab —— 脚本只用你已有的登录态
 
+> 装完**记得看面板标题**：写成 `Fab 免费资产 · v1.5.2` 才是新版。
+> 如果装到的是老版本（jsDelivr 的分支缓存最长 12 小时），用固定版本链接装一次：
+> `https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@9f40b03/epic-fab-claimer.user.js`
+
 > 脚本自带 `@updateURL`（jsDelivr），作者推新版后 Tampermonkey 会自动更新（默认每 24 小时查一次，
 > 也可在扩展设置里把「检查更新」间隔调小）。手动更新：Tampermonkey 面板 → 本脚本 → 检查更新。
 
@@ -243,6 +247,7 @@ node test_logic.mjs     # 用 free_sample.json（真实接口快照）验免费�
 
 | 版本 | 要点 |
 |---|---|
+| 1.5.2 | 启动日志直接提示设置入口在哪 |
 | 1.5.1 | 更新地址从 GitHub raw 换成 jsDelivr（raw 在部分网络被墙，导致自动更新从未生效）；面板标题和启动日志都带版本号；菜单加「检查更新 / 重装」 |
 | 1.5.0 | 列表**翻页**（每页 24 条，以前永远只看到 24 个）；开局**拉整库**做本地比对，已在库的条目零请求跳过；新增「列表翻几页 / 读库翻几页」设置 |
 | 1.4.0 | 独立**设置面板**（菜单命令 / 面板按钮打开，13 项全可调，改完即生效）；新增浮窗总开关、每天弹窗上限、失败通知开关；设置导入导出 + 脏值归一化 |
