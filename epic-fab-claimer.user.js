@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.5.2
+// @version      1.6.0
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,12 +44,13 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.5.2';
+  const VERSION = '1.6.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
     maxEpicPerRun: 3,    // 每轮最多开 3 个领取页
-    maxFabPerRun: 25,    // 每轮最多领 25 个资产
+    maxFabPerRun: 25,    // 每轮最多领多少个 Fab 资产
+    fabConcurrency: 3,   // 并发领取数（1 = 串行；6~8 更快，但容易被限流）
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
@@ -556,8 +557,11 @@
     const dailyClaimed = [];
     const dailyOwned = [];
     const dailyFailed = [];
+    let authFailStop = false;
+
+    // ── 1) 本地先筛：不发任何请求就能确定跳过的都在这儿处理 ──
+    const todo = [];
     for (const it of items) {
-      if (done >= st.maxFabPerRun) break;
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
@@ -577,7 +581,14 @@
       }
       // 手动扫描：失败/待登录的都重试；自动跑：needs-login 也不受冷却限制
       if (prev && prev.state !== 'claimed' && !force && prev.state !== 'needs-login' && recentlyTried(prev, st.retryDays)) continue;
+      todo.push({ id, title, prev, upgrading });
+    }
+    const conc = Math.max(1, Math.min(8, Number(st.fabConcurrency) || 3));
+    await log(`Fab：需要处理 ${todo.length} 个，并发 ${conc}（其余已在库或冷却中）`);
 
+    // ── 2) 并发领取 ──
+    async function claimOne(entry) {
+      const { id, title, prev, upgrading } = entry;
       let offer = null;
       let tier = '';
       let lic = null;
@@ -610,7 +621,7 @@
         await setHist(K.fabHist, id, { title, state: 'no-free-tier', at: Date.now() });
         await log(`Fab：${title.slice(0, 28)} 当前没有免费档位（原价/折扣已过），跳过`, 'warn');
         noTierCount++;
-        continue;
+        return;
       }
       const tierLabel = until ? `${tier}·限时到 ${new Date(until).toLocaleDateString('zh-CN')}` : tier;
       if (upgrading && !isProTier(lic || tier)) {
@@ -619,12 +630,12 @@
           title, state: 'claimed', at: prev.at || Date.now(),
           offer: prev.offer, license: prev.license, proCheckedAt: Date.now(),
         });
-        continue;
+        return;
       }
       if (st.dryRun) {
         await log(`Fab：[仅扫描] ${upgrading ? '可补专业版' : '可领'} ${title.slice(0, 28)}〔${tierLabel}〕`, 'ok');
         done++;
-        continue;
+        return;
       }
 
       let ok = false, why = '', status = 0, authFail = false, needCart = false;
@@ -646,11 +657,10 @@
           try { body = (await r.text()).slice(0, 160); } catch (e) { /* ignore */ }
           why = `HTTP ${status}${body ? ' ' + body : ''}`;
           if (status === 401) { authFail = true; break; }
-          // 限时免费不认折扣价：add-to-library 回 400 "Not free."，必须走购物车结算。
-          // 报错文案会变（中英/版本都可能不同），所以只要这一档是"限时免费"就兜底走购物车，
-          // 购物车那边会自己校验 0 元，安全。
+          // 限时免费回 400 "Not free."、打包(bundle)回 400 "Listing is a bundle."，
+          // 两者 add-to-library 都不认，改走购物车结算；购物车自己校验 0 元，多试一次没有风险。
           if ((status === 400 || status === 409 || status === 422)
-            && (until || /not free|免费|free/i.test(body))) { needCart = true; break; }
+            && (until || /not free|bundle|免费|free/i.test(body))) { needCart = true; break; }
           if (status === 429) { await log('Fab：被限流，20s 后重试', 'warn'); await sleep(20000); }
           else if (status === 403) { await log('Fab：CSRF 被拒（cookie 与头不一致），可能是页面 cookie 刚刷新', 'warn'); await sleep(1500); }
           else break;
@@ -677,14 +687,31 @@
         bigBanner('Fab 登录态失效：登录一次后我会自动接着领', 'rgba(200,120,20,.95)');
         notifyFail('Fab 需要重新登录', 'Fab 领取');
         dailyFailed.push({ title, reason: '未登录' });
-        break;
+        authFailStop = true;
       } else {
         await setHist(K.fabHist, id, { title, state: 'failed', at: Date.now(), why });
         await log(`Fab：${title.slice(0, 26)} 失败 ${why}`, 'warn');
         dailyFailed.push({ title, reason: why });
       }
-      await sleep(1200);
     }
+
+    let nextIdx = 0;
+    let inFlight = 0;
+    async function worker() {
+      while (!authFailStop && done + inFlight < st.maxFabPerRun) {
+        const i = nextIdx++;
+        if (i >= todo.length) return;
+        inFlight++;
+        try {
+          await claimOne(todo[i]);
+        } finally {
+          inFlight--;
+        }
+        await sleep(200 + Math.random() * 200);   // 并发之间的抖动，别踩同一个节拍
+      }
+    }
+    await Promise.all(Array.from({ length: conc }, () => worker()));
+
     await log(`Fab：本轮结束 —— 新领 ${done} 个 / 已在库 ${ownedCount} 个 / 无免费档 ${noTierCount} 个 / 失败 ${dailyFailed.length} 个`);
     if (done) gmNotify(`本轮领取 ${done} 个 Fab 免费资产`, 'Fab 领取完成');
     await dailyPatch('fab', {
@@ -1241,6 +1268,7 @@
       fields: [
         { k: 'maxEpicPerRun', type: 'num', label: 'Epic 每轮最多领', min: 1, max: 10, unit: '个' },
         { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 200, unit: '个' },
+        { k: 'fabConcurrency', type: 'num', label: '并发领取数', min: 1, max: 8, unit: '个', hint: '1 = 一个一个领；4~6 大约快 3 倍，太高会被限流' },
         { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 40, unit: '页', hint: '每页 24 条；Fab 上免费资产有几百个，只翻 1 页就只能看到 24 个' },
         { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 40, unit: '页', hint: '库里的条目越多这里要越大，否则老条目会被误判成"没领过"' },
       ],

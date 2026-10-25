@@ -219,5 +219,58 @@ check('悬浮窗文案分得清「领到」和「领过了」',
     String(calls2.filter((c) => c.startsWith('GET /i/listings/search')).length));
 }
 
+// ── 场景 3：并发领取（同时最多几个在飞）+ 每轮上限 ──
+{
+  const calls3 = [];
+  let live = 0;
+  let maxLive = 0;
+  const r3 = (status, body) => ({
+    ok: status >= 200 && status < 300, status,
+    json: async () => body, text: async () => JSON.stringify(body),
+  });
+  const titles = Array.from({ length: 12 }, (_, i) => `Free Item ${i + 1}`);
+
+  sandbox.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    const method = (opts.method || 'GET').toUpperCase();
+    calls3.push(`${method} ${u}`);
+    if (u === '/i/users/me') return r3(200, { displayName: 'RuinDream' });
+    if (u.startsWith('/i/library/search')) return r3(200, { results: [], cursors: { next: null } });
+    if (u.includes('min_discount_percentage=100')) return r3(200, { results: [], cursors: { next: null } });
+    if (u.includes('is_free=1')) {
+      return r3(200, { results: titles.map((t) => ({ uid: 'id-' + t, title: t })), cursors: { next: null } });
+    }
+    if (u.includes('/add-to-library')) {
+      live++;
+      maxLive = Math.max(maxLive, live);
+      await new Promise((r) => setTimeout(r, 40));   // 模拟网络往返，让并发真的重叠
+      live--;
+      return r3(200, '{}');
+    }
+    if (u.startsWith('/i/listings/')) {
+      live++;
+      maxLive = Math.max(maxLive, live);
+      await new Promise((r) => setTimeout(r, 25));
+      live--;
+      return r3(200, { title: 'x', licenses: [{ name: 'Personal', slug: 'personal',
+        offerId: 'off-' + u, listingLicenseId: 'll-' + u, priceTier: { price: 0 } }] });
+    }
+    return r3(404, { detail: 'not stubbed ' + u });
+  };
+
+  store.set('efc:fab:history', {});
+  store.set('efc:settings', { fabConcurrency: 4, maxFabPerRun: 5 });
+  store.set('efc:log', []);
+  await I.fabRun(true);
+
+  const daily3 = (store.get('efc:daily') || {}).fab || {};
+  const claimed3 = daily3.claimed || [];
+  check('并发生效（同时在飞 > 1）', maxLive >= 2, `最大并发 ${maxLive}`);
+  check('每轮上限被遵守（5 个）', claimed3.length === 5, `实领 ${claimed3.length}: ${claimed3.join(',')}`);
+  check('没有多发 add-to-library（只针对被领的 5 个）',
+    calls3.filter((c) => c.includes('add-to-library')).length === 5,
+    String(calls3.filter((c) => c.includes('add-to-library')).length));
+}
+
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }
 console.log('\nFAB-FLOW PASS');
