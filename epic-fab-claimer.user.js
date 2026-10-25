@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.7.0
+// @version      1.7.1
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.7.0';
+  const VERSION = '1.7.1';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -55,7 +55,7 @@
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
     fabListPages: 40,    // Fab 免费列表翻几页（每页 24 条；is_free=1 实测 1900+ 条）
-    libPages: 40,        // 拉库时翻几页（每页 24 条），用于判断"已在库"
+    libPages: 80,        // 拉库时翻几页（每页 24 条）；库 1500+ 条 = 64 页，翻少了会误判
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
     notifyFail: true,    // 领取失败时发系统通知
@@ -1341,7 +1341,7 @@
         { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 3000, unit: '个', hint: '想一次领完就拉到 2000+；每 100 个大约 30~60 秒' },
         { k: 'fabConcurrency', type: 'num', label: '并发领取数', min: 1, max: 12, unit: '个', hint: '1 = 串行；6~8 大约快 5 倍，10+ 容易被限流' },
         { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 120, unit: '页', hint: '每页 24 条，40 页 = 960 条；is_free=1 实测 1900+ 条，要全量就填 120' },
-        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 120, unit: '页', hint: '库里的条目越多这里要越大，否则老条目会被误判成"没领过"' },
+        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 200, unit: '页', hint: '每页 24 条；库现在 1500+ 条 = 64 页，翻少了老条目会被误判成"没领过"' },
       ],
     },
     {
