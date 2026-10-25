@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.6.1
+// @version      1.6.2
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
 // @supportURL   https://github.com/LHuiMeng/epic-fab-claimer-userscript/issues
-// @updateURL    https://ghproxy.net/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
-// @downloadURL  https://ghproxy.net/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
+// @updateURL    https://gh-proxy.com/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
+// @downloadURL  https://gh-proxy.com/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
 // @match        https://store.epicgames.com/*
 // @match        https://www.epicgames.com/*
 // @match        https://www.fab.com/*
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -66,9 +66,10 @@
   const FREE_API = 'https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions'
     + '?locale=zh-CN&country=CN&allowCountries=CN';
   // 主更新通道：ghproxy 直通 raw（国内可直连、没有 CDN 分支缓存）
-  const CDN_URL = 'https://ghproxy.net/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js';
+  const CDN_URL = 'https://gh-proxy.com/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js';
   // 备用镜像：jsDelivr（分支文件有最长 12h 缓存，只当兜底）
-  const CDN_URL_FALLBACK = 'https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js';
+  const CDN_URL_FALLBACK = 'https://ghfast.top/https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js';
+  const CDN_URL_FALLBACK2 = 'https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js';
   const STORE = 'https://store.epicgames.com';
   const CAPTCHA_WAIT_MS = 5 * 60 * 1000;
 
@@ -1601,8 +1602,11 @@
         window.GM_registerMenuCommand('🔁 检查更新 / 重装', () => {
           gmOpenTab(`${CDN_URL}?t=${Date.now()}`, { active: true });
         });
-        window.GM_registerMenuCommand('🔁 备用镜像更新（主通道打不开时）', () => {
+        window.GM_registerMenuCommand('🔁 备用镜像 1（ghfast）', () => {
           gmOpenTab(`${CDN_URL_FALLBACK}?t=${Date.now()}`, { active: true });
+        });
+        window.GM_registerMenuCommand('🔁 备用镜像 2（jsDelivr）', () => {
+          gmOpenTab(`${CDN_URL_FALLBACK2}?t=${Date.now()}`, { active: true });
         });
       }
     } catch (e) { /* 有的管理器不让注册，面板按钮兜底 */ }
