@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.5.0
+// @version      1.5.1
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
 // @supportURL   https://github.com/LHuiMeng/epic-fab-claimer-userscript/issues
-// @updateURL    https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
-// @downloadURL  https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js
+// @updateURL    https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js
+// @downloadURL  https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js
 // @match        https://store.epicgames.com/*
 // @match        https://www.epicgames.com/*
 // @match        https://www.fab.com/*
@@ -44,7 +44,7 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.1';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -64,6 +64,7 @@
   };
   const FREE_API = 'https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions'
     + '?locale=zh-CN&country=CN&allowCountries=CN';
+  const CDN_URL = 'https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js';
   const STORE = 'https://store.epicgames.com';
   const CAPTCHA_WAIT_MS = 5 * 60 * 1000;
 
@@ -205,7 +206,7 @@
     const dot = root.querySelector('.dot');
     const logEl = root.querySelector('#log');
     const hintEl = root.querySelector('.hint');
-    root.querySelector('b').textContent = title;
+    root.querySelector('b').textContent = `${title} · v${VERSION}`;
     root.querySelector('.hd').addEventListener('click', () => box.classList.toggle('collapsed'));
 
     ui = {
@@ -1566,6 +1567,9 @@
     try {
       if (typeof window.GM_registerMenuCommand === 'function') {
         window.GM_registerMenuCommand('⚙ 脚本设置', () => { openSettings(); });
+        window.GM_registerMenuCommand('🔁 检查更新 / 重装', () => {
+          gmOpenTab(`${CDN_URL}?t=${Date.now()}`, { active: true });
+        });
       }
     } catch (e) { /* 有的管理器不让注册，面板按钮兜底 */ }
   }
@@ -1579,6 +1583,7 @@
 
   async function boot() {
     const host = location.hostname;
+    await log(`Epic/Fab 助手 v${VERSION} 已加载（${host}）`);
     const args = parseArgs();
 
     // 领取标签页（我们自己开的）

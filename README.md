@@ -6,10 +6,14 @@
 ## 安装
 
 1. 浏览器装 [Tampermonkey](https://www.tampermonkey.net/)（Firefox 可用 Violentmonkey）
-2. 点这里安装：[**epic-fab-claimer.user.js**](https://raw.githubusercontent.com/LHuiMeng/epic-fab-claimer-userscript/main/epic-fab-claimer.user.js)
+2. 点这里安装：[**epic-fab-claimer.user.js**](https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@main/epic-fab-claimer.user.js)
+
+   > 安装 / 更新地址用 **jsDelivr**，不用 GitHub raw：`raw.githubusercontent.com` 在部分网络下直接 `Failed to fetch`（实测 9ms 被拒），
+   > 用 raw 的 `@updateURL` 等于自动更新从来没成功过 —— 表现就是「脚本一直是老版本、也没有设置界面」。
+   > 三个镜像都能用：`fastly.jsdelivr.net` / `gcore.jsdelivr.net` / `cdn.jsdelivr.net`。
 3. 先在浏览器里登录一次 Epic 和 Fab —— 脚本只用你已有的登录态
 
-> 脚本自带 `@updateURL`，作者推新版后 Tampermonkey 会自动更新（默认每 24 小时查一次，
+> 脚本自带 `@updateURL`（jsDelivr），作者推新版后 Tampermonkey 会自动更新（默认每 24 小时查一次，
 > 也可在扩展设置里把「检查更新」间隔调小）。手动更新：Tampermonkey 面板 → 本脚本 → 检查更新。
 
 ## 它什么时候跑（v1.3.0：打开浏览器就干活）
@@ -239,6 +243,7 @@ node test_logic.mjs     # 用 free_sample.json（真实接口快照）验免费�
 
 | 版本 | 要点 |
 |---|---|
+| 1.5.1 | 更新地址从 GitHub raw 换成 jsDelivr（raw 在部分网络被墙，导致自动更新从未生效）；面板标题和启动日志都带版本号；菜单加「检查更新 / 重装」 |
 | 1.5.0 | 列表**翻页**（每页 24 条，以前永远只看到 24 个）；开局**拉整库**做本地比对，已在库的条目零请求跳过；新增「列表翻几页 / 读库翻几页」设置 |
 | 1.4.0 | 独立**设置面板**（菜单命令 / 面板按钮打开，13 项全可调，改完即生效）；新增浮窗总开关、每天弹窗上限、失败通知开关；设置导入导出 + 脏值归一化 |
 | 1.3.2 | 「领过（已在库）」日志加开关，面板一键切换，默认关；Epic 的「已处理过，跳过」同管 |
