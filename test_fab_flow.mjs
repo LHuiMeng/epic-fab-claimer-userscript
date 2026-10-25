@@ -154,5 +154,70 @@ check('悬浮窗文案分得清「领到」和「领过了」',
     logs2.map((l) => l.msg).join(' / ').slice(0, 160));
 }
 
+// ── 场景 2：翻页 + 整库比对（已拥有的条目一个请求都不发）──
+{
+  const calls2 = [];
+  let finalized2 = 0;
+  const OWNED = ['Owned Alpha One', 'Owned Beta Two', 'Owned Gamma Three'];
+  const r2 = (status, body) => ({
+    ok: status >= 200 && status < 300, status,
+    json: async () => body, text: async () => JSON.stringify(body),
+  });
+  const page = (titles, next) => ({ results: titles.map((t) => ({ uid: 'u-' + t, title: t })),
+    cursors: { next: next || null } });
+
+  sandbox.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    calls2.push(`${(opts.method || 'GET').toUpperCase()} ${u}`);
+    if (u === '/i/users/me') return r2(200, { displayName: 'RuinDream' });
+    if (u.includes('min_discount_percentage=100')) return r2(200, page([], null));
+    if (u.includes('is_free=1')) {
+      if (u.includes('cursor=c1')) return r2(200, page(['Owned Beta Two', 'New Free Item A'], 'c2'));
+      if (u.includes('cursor=c2')) return r2(200, page(['New Free Item B'], null));
+      return r2(200, page(['Owned Alpha One', 'Owned Gamma Three'], 'c1'));
+    }
+    if (u.startsWith('/i/library/search')) {
+      if (u.includes('cursor=lib1')) return r2(200, page(OWNED.slice(2), null));
+      return r2(200, page(OWNED.slice(0, 2), 'lib1'));
+    }
+    if (u.includes('/add-to-library')) return r2(200, '{}');
+    if (u === '/i/cart' ) return r2(200, { items: [], totalPrice: { discountPrice: 0 } });
+    if (u.startsWith('/i/listings/') && !u.includes('add-to-library')) {
+      return r2(200, { title: 'x', licenses: [{ name: 'Personal', slug: 'personal',
+        offerId: 'off-' + u, listingLicenseId: 'll-' + u,
+        priceTier: { price: 0 } }] });
+    }
+    return r2(404, { detail: 'not stubbed: ' + u });
+  };
+
+  store.set('efc:fab:history', {});
+  store.set('efc:settings', {});
+  store.set('efc:log', []);
+  await I.fabRun(true);
+
+  const hist2 = store.get('efc:fab:history') || {};
+  const claimedTitles = Object.values(hist2).filter((v) => v.state === 'claimed').map((v) => v.title);
+  check('翻页后新条目都领到了', ['New Free Item A', 'New Free Item B'].every((t) => claimedTitles.includes(t)),
+    claimedTitles.join(','));
+  const daily2 = (store.get('efc:daily') || {}).fab || {};
+  check('已在库的三个没被算成「新领」',
+    !(daily2.claimed || []).some((t) => OWNED.includes(t)) && (daily2.claimed || []).length === 2,
+    JSON.stringify(daily2.claimed));
+  check('已在库的三个记进「已在库」',
+    (daily2.owned || []).length === 3, JSON.stringify(daily2.owned));
+  check('已拥有的条目没发 add-to-library',
+    !calls2.some((c) => c.includes('add-to-library') && OWNED.some((t) => calls2.length && c.includes('u-' + t))) &&
+    calls2.filter((c) => c.includes('add-to-library')).length === 2,
+    `add-to-library 次数 ${calls2.filter((c) => c.includes('add-to-library')).length}`);
+  check('已拥有的条目没发详情请求',
+    !OWNED.some((t) => calls2.some((c) => c.startsWith('GET /i/listings/u-' + t))));
+  check('库只按页拉了 2 次（不是每条一次）',
+    calls2.filter((c) => c.startsWith('GET /i/library/search')).length === 2,
+    calls2.filter((c) => c.startsWith('GET /i/library/search')).join(' | '));
+  check('列表按页翻（is_free 3 页 + 100% 折扣 1 页 = 4 次）',
+    calls2.filter((c) => c.startsWith('GET /i/listings/search')).length === 4,
+    String(calls2.filter((c) => c.startsWith('GET /i/listings/search')).length));
+}
+
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }
 console.log('\nFAB-FLOW PASS');

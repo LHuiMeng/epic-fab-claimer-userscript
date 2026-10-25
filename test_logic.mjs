@@ -198,7 +198,7 @@ console.log('CLAIM-DETECT PASS');
   const N = I.normalizeSettings;
   const cases = [
     ['数字字符串被转成数字', { maxFabPerRun: '7' }, (r) => r.maxFabPerRun === 7],
-    ['超过上限被夹住', { maxFabPerRun: 9999 }, (r) => r.maxFabPerRun === 50],
+    ['超过上限被夹住', { maxFabPerRun: 9999 }, (r) => r.maxFabPerRun === 200],
     ['低于下限被夹住', { toastMaxPerDay: -5 }, (r) => r.toastMaxPerDay === 0],
     ['小数被取整', { epicRetryMinutes: 45.7 }, (r) => r.epicRetryMinutes === 46],
     ['布尔按真值取', { autoEpic: 'yes', logOwned: 0 }, (r) => r.autoEpic === true && r.logOwned === false],

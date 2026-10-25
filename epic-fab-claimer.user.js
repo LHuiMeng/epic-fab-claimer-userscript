@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.4.0
+// @version      1.5.0
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,15 +44,17 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
     maxEpicPerRun: 3,    // 每轮最多开 3 个领取页
-    maxFabPerRun: 10,    // 每轮最多领 10 个资产
+    maxFabPerRun: 25,    // 每轮最多领 25 个资产
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
+    fabListPages: 10,    // Fab 免费列表翻几页（每页 24 条）
+    libPages: 20,        // 拉库时翻几页（每页 24 条），用于判断"已在库"
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
     notifyFail: true,    // 领取失败时发系统通知
@@ -489,24 +491,40 @@
     }
     if (me) await log(`Fab：已登录 ${me.displayName || me.username || ''}`);
 
+    // ── 列表：两条口子 + 翻页（Fab 每页固定 24 条，count 传大也没用）──
     let items = [];
+    let listPages = 0;
+    let listTruncated = false;
     try {
-      // 两条口子都要：永久免费在 is_free=1；**限时免费只在 100% 折扣这条**，
-      // 实测它不出现在 is_free=1 里，这也是"限时免费没领"的根因。
       const sources = [
-        '/i/listings/search?min_discount_percentage=100&count=60&sort_by=-createdAt',
-        '/i/listings/search?is_free=1&count=60&sort_by=-createdAt',
+        // 限时免费只在 100% 折扣这条里出现，必须单独捞
+        'min_discount_percentage=100',
+        'is_free=1',
       ];
       const seen = new Set();
-      for (const src of sources) {
-        const r = await fetch(src, { credentials: 'include', headers: { Accept: 'application/json' } });
-        if (!r.ok) { await log(`Fab：列表 ${src.split('?')[1]} → HTTP ${r.status}`, 'warn'); continue; }
-        const j = await r.json();
-        for (const it of (j.results || j.listings || [])) {
-          const id = it.uid || it.id;
-          if (!id || seen.has(id)) continue;
-          seen.add(id);
-          items.push(it);
+      const pageCap = Math.max(1, Math.min(40, st.fabListPages || 10));
+      for (const qs of sources) {
+        let cursor = '';
+        for (let page = 0; page < pageCap; page++) {
+          const url = `/i/listings/search?${qs}&count=24&sort_by=-createdAt`
+            + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+          const r = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+          if (!r.ok) {
+            await log(`Fab：列表 ${qs} 第 ${page + 1} 页 → HTTP ${r.status}`, 'warn');
+            break;
+          }
+          const j = await r.json();
+          const rows = j.results || j.listings || [];
+          for (const it of rows) {
+            const id = it.uid || it.id;
+            if (!id || seen.has(id)) continue;
+            seen.add(id);
+            items.push(it);
+          }
+          listPages++;
+          cursor = (j.cursors && j.cursors.next) || '';
+          if (!cursor || !rows.length) break;
+          if (page === pageCap - 1 && cursor) listTruncated = true;
         }
       }
       items.sort((a, b) => {
@@ -522,35 +540,13 @@
       ui.busy(false, true);
       return;
     }
-    await log(`Fab：免费列表 ${items.length} 个`);
+    await log(`Fab：免费候选 ${items.length} 个（翻了 ${listPages} 页${listTruncated ? '，到页数上限了' : ''}）`);
 
-    // 已拥有判据：/i/library/search?q=标题（实测 200，results[].listing.title 就是库里的）。
-    // 别用整页 /library 扫 —— 它只渲染第一页（约 48 条），早领过的会漏；
-    // add-to-library 对已拥有也回 204、加购物车也回 201，两个都不能当判据。
-    const ownedCache = new Map();
-    const normT = (x) => String(x || '').replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'")
-      .replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
-    async function fabOwned(title) {
-      const want = normT(title);
-      if (!want) return false;
-      if (ownedCache.has(want)) return ownedCache.get(want);
-      let owned = false;
-      try {
-        const r = await fetch(`/i/library/search?q=${encodeURIComponent(String(title).slice(0, 60))}&count=10`,
-          { credentials: 'include', headers: { Accept: 'application/json' } });
-        if (r.ok) {
-          const j = await r.json();
-          for (const row of (j.results || [])) {
-            const got = normT((row.listing && row.listing.title) || row.title || '');
-            if (!got) continue;
-            if (got === want || (want.length >= 12 && want.slice(0, 24) === got.slice(0, 24))
-              || want.slice(0, 24).includes(got.slice(0, 24)) && got.length >= 12) { owned = true; break; }
-          }
-        }
-      } catch (e) { /* 查不到就当没证据，不冒充 */ }
-      ownedCache.set(want, owned);
-      return owned;
-    }
+    // ── 库：一次翻完，本地比对 ──
+    // 关键：已经在库里的条目**一个请求都不发**（不发详情、不发 add-to-library、也不逐条查库）。
+    // 逐条查 /i/library/search 是每条一次请求，几百个条目就是几百次 —— 这里改成先拉全库。
+    const lib = await libraryTitleSet(st);
+    await log(`Fab：库里有 ${lib.count} 条（翻了 ${lib.pages} 页${lib.truncated ? '，到页数上限了' : ''}）`);
 
     const h = await hist(K.fabHist);
     let done = 0;
@@ -564,7 +560,7 @@
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
-      if (await fabOwned(title)) {
+      if (libHas(lib, title)) {
         await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
         dailyOwned.push(title);
         ownedCount++;
@@ -671,6 +667,7 @@
         await setHist(K.fabHist, id, rec);
         await log(`Fab：${upgrading ? '补领专业版' : '领到'} ${title.slice(0, 30)}〔${tierLabel}〕`, 'ok');
         dailyClaimed.push(title);
+        lib.set.add(normT(title));
         done++;
       } else if (authFail) {
         // 401 = 这个会话没登录/已过期，不是这一条的问题，别再拿后面的条目继续撞
@@ -694,6 +691,58 @@
       owned: dailyOwned, ownedCount, noTierCount, failed: dailyFailed,
     });
     ui.busy(false);
+  }
+
+  // ── 标题归一化：HTML 里 & 是 &amp;、' 是 &#x27;，不归一化就会漏匹配 ──
+  function normT(x) {
+    return String(x || '')
+      .replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  // ── 一次性把整库标题拉成 Set ──
+  // Fab 每页固定 24 条，用 cursors.next 翻；这样"这条在不在库里"是纯本地判断，
+  // 已拥有的条目一个请求都不发（这是主人明确要的行为）。
+  async function libraryTitleSet(st) {
+    const set = new Set();
+    const cap = Math.max(1, Math.min(40, st.libPages || 20));
+    let cursor = '';
+    let pages = 0;
+    let truncated = false;
+    for (let i = 0; i < cap; i++) {
+      const url = `/i/library/search?count=24` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+      let r;
+      try {
+        r = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+      } catch (e) { break; }
+      if (!r.ok) break;
+      let j;
+      try { j = await r.json(); } catch (e) { break; }
+      const rows = j.results || [];
+      for (const row of rows) {
+        const t = normT((row.listing && row.listing.title) || row.title || '');
+        if (t) set.add(t);
+      }
+      pages++;
+      cursor = (j.cursors && j.cursors.next) || '';
+      if (!cursor || !rows.length) break;
+      if (i === cap - 1 && cursor) truncated = true;
+    }
+    return { set, count: set.size, pages, truncated };
+  }
+
+  // 库里的标题常被截断，所以先全等比，再按 24 字前缀比
+  function libHas(lib, title) {
+    const want = normT(title);
+    if (!want) return false;
+    if (lib.set.has(want)) return true;
+    const head = want.slice(0, 24);
+    if (head.length < 12) return false;
+    for (const t of lib.set) {
+      if (t.startsWith(head)) return true;
+      if (t.length >= 12 && head.startsWith(t.slice(0, 24))) return true;
+    }
+    return false;
   }
 
   // 限时免费专用：走购物车结算。**任何一个环节不是 0 元就撤单**，绝不动钱。
@@ -1190,7 +1239,9 @@
       section: '每轮上限',
       fields: [
         { k: 'maxEpicPerRun', type: 'num', label: 'Epic 每轮最多领', min: 1, max: 10, unit: '个' },
-        { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 50, unit: '个' },
+        { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 200, unit: '个' },
+        { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 40, unit: '页', hint: '每页 24 条；Fab 上免费资产有几百个，只翻 1 页就只能看到 24 个' },
+        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 40, unit: '页', hint: '库里的条目越多这里要越大，否则老条目会被误判成"没领过"' },
       ],
     },
     {
