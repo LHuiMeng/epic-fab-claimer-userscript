@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.6.3
+// @version      1.7.0
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -44,18 +44,18 @@
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
   };
-  const VERSION = '1.6.3';
+  const VERSION = '1.7.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
     maxEpicPerRun: 3,    // 每轮最多开 3 个领取页
-    maxFabPerRun: 25,    // 每轮最多领多少个 Fab 资产
-    fabConcurrency: 3,   // 并发领取数（1 = 串行；6~8 更快，但容易被限流）
+    maxFabPerRun: 300,   // 每轮最多领多少个 Fab 资产（0/超大 = 不限）
+    fabConcurrency: 6,   // 并发领取数（1 = 串行；6~10 更快，但容易被限流）
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
-    fabListPages: 20,    // Fab 免费列表翻几页（每页 24 条；Fab 上免费资产有 900+ 条）
-    libPages: 20,        // 拉库时翻几页（每页 24 条），用于判断"已在库"
+    fabListPages: 40,    // Fab 免费列表翻几页（每页 24 条；is_free=1 实测 1900+ 条）
+    libPages: 40,        // 拉库时翻几页（每页 24 条），用于判断"已在库"
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
     notifyFail: true,    // 领取失败时发系统通知
@@ -166,6 +166,45 @@
 
   // ────────────────────────────── 悬浮面板 ──────────────────────────────
   let ui = null;
+
+  // ── 实时进度（阶段 / 百分比 / 计数 / 心跳）──
+  // 主人抱怨「不知道是不是卡住了」：所以除了百分比，还显示「上次活动 N 秒前」，
+  // 超过 15 秒没动静进度条变橙——是不是卡住一眼能看出来。
+  const PROG = { on: false, phase: '', done: 0, total: 0, claimed: 0, failed: 0, owned: 0, t0: 0, last: 0 };
+  let progTimer = null;
+
+  function progPaint() {
+    if (!ui || !ui.prog) return;
+    const idle = PROG.on ? Math.round((Date.now() - PROG.last) / 1000) : 0;
+    const secs = PROG.on ? Math.round((Date.now() - PROG.t0) / 1000) : 0;
+    const pct = PROG.total > 0 ? Math.min(100, Math.round((PROG.done / PROG.total) * 100)) : 0;
+    if (ui.bar) ui.bar.style.width = pct + '%';
+    if (ui.barBox) ui.barBox.className = 'bar' + (PROG.on && idle >= 15 ? ' stall' : '');
+    const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+    const ss = String(secs % 60).padStart(2, '0');
+    ui.prog.textContent = PROG.on
+      ? `${PROG.phase} ${PROG.done}${PROG.total ? '/' + PROG.total : ''}${PROG.total ? '（' + pct + '%）' : ''}
+`
+        + `领到 ${PROG.claimed} · 失败 ${PROG.failed} · 已在库 ${PROG.owned} · 耗时 ${mm}:${ss}`
+        + `
+上次活动 ${idle}s 前${idle >= 15 ? ' ⏳ 服务端有点慢，还在等' : ''}`
+      : (PROG.phase || '空闲');
+  }
+  function progStart(phase, total) {
+    Object.assign(PROG, { on: true, phase, done: 0, total: total || 0, claimed: 0, failed: 0, owned: 0, t0: Date.now(), last: Date.now() });
+    if (!progTimer) progTimer = setInterval(() => { if (PROG.on) progPaint(); }, 1000);
+    progPaint();
+  }
+  function progSet(patch) {
+    Object.assign(PROG, patch);
+    PROG.last = Date.now();
+    progPaint();
+  }
+  function progEnd(phase) {
+    PROG.on = false;
+    PROG.phase = phase || '空闲';
+    progPaint();
+  }
   function mountPanel(title) {
     if (ui || !document.body) return ui;
     const host = document.createElement('div');
@@ -190,6 +229,12 @@
         button { flex:1; font: inherit; font-size: 11px; color:#e8e8ea; background: rgba(255,255,255,.08);
                  border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 4px 0; cursor: pointer; }
         button:hover { background: rgba(255,255,255,.16); }
+        .progwrap { margin: 2px 0 6px; }
+        .bar { height: 5px; border-radius: 999px; background: rgba(255,255,255,.12); overflow: hidden; }
+        .bar i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg,#6ee7a8,#7aa2ff);
+                 transition: width .25s; }
+        .bar.stall i { background: linear-gradient(90deg,#ffd166,#ff9a9a); }
+        .ptxt { font-size: 10.5px; opacity: .8; margin-top: 3px; white-space: pre-wrap; }
         #log { max-height: 168px; overflow: auto; white-space: pre-wrap; word-break: break-all;
                font-size: 11px; color: #b9b9c2; margin-top: 6px; border-top: 1px solid rgba(255,255,255,.1); padding-top: 6px; }
         #log .warnline { color: #ffb4b4; }
@@ -203,6 +248,7 @@
           <div class="row"><button data-act="scan">立即扫描本轮</button><button data-act="clear">清日志</button></div>
           <div class="row"><button data-act="openSettings">⚙ 设置</button></div>
           <div class="row"><button data-act="logowned">领过日志：关</button></div>
+          <div class="progwrap"><div class="bar"><i></i></div><div class="ptxt">空闲</div></div>
           <div id="log"></div>
           <div class="hint"></div>
         </div>
@@ -210,6 +256,9 @@
     const box = root.querySelector('.box');
     const dot = root.querySelector('.dot');
     const logEl = root.querySelector('#log');
+    const barEl = root.querySelector('.bar');
+    const barFill = root.querySelector('.bar i');
+    const progEl = root.querySelector('.ptxt');
     const hintEl = root.querySelector('.hint');
     root.querySelector('b').textContent = `${title} · v${VERSION}`;
     root.querySelector('.hd').addEventListener('click', () => box.classList.toggle('collapsed'));
@@ -228,6 +277,9 @@
         const btnOwned = root.querySelector('[data-act="logowned"]');
         if (btnOwned) btnOwned.textContent = `领过日志：${st.logOwned ? '开' : '关'}`;
       },
+      bar: barFill,
+      barBox: barEl,
+      prog: progEl,
       busy(on, warn) {
         dot.className = 'dot' + (warn ? ' warn' : (on ? ' busy' : ''));
       },
@@ -467,10 +519,12 @@
 
     mountPanel('Fab 免费资产');
     ui.busy(true);
+    progStart('扫描列表', 0);
     await log(`Fab：开始扫描（同源接口）`);
 
     const csrf = cookieVal('fab_csrftoken');
     if (!csrf) {
+      progEnd('未登录：缺 fab_csrftoken');
       await log('Fab：没有 fab_csrftoken cookie，可能未登录 — 本次跳过', 'warn');
       await dailyPatch('fab', { done: true, listed: 0, claimed: [],
         failed: [{ title: 'Fab 未登录', reason: '没有 fab_csrftoken' }] });
@@ -485,6 +539,7 @@
       const r = await fetch('/i/users/me', { credentials: 'include', headers: { Accept: 'application/json' } });
       if (r.ok) me = await r.json();
       else if (r.status === 401 || r.status === 403) {
+        progEnd(`未登录（/i/users/me ${r.status}）`);
         await log('Fab：未登录（/i/users/me → ' + r.status + '），先登录 Fab 再扫', 'warn');
         bigBanner('Fab 还没登录 —— 登录一次后点「立即扫描本轮」', 'rgba(200,120,20,.95)');
         await dailyPatch('fab', { done: true, listed: 0, claimed: [],
@@ -528,6 +583,7 @@
             items.push(it);
           }
           listPages++;
+          progSet({ phase: '扫描列表', done: listPages, total: pageCap * sources.length });
           cursor = (j.cursors && j.cursors.next) || '';
           if (!cursor || !rows.length) break;
           if (page === pageCap - 1 && cursor) listTruncated = true;
@@ -540,6 +596,7 @@
         return la - lb;
       });
     } catch (e) {
+      progEnd('列表失败');
       await log(`Fab：列表失败 ${e.message}`, 'warn');
       await dailyPatch('fab', { done: true, listed: 0, claimed: [],
         failed: [{ title: 'Fab 列表拉取失败', reason: e.message }] });
@@ -551,7 +608,8 @@
     // ── 库：一次翻完，本地比对 ──
     // 关键：已经在库里的条目**一个请求都不发**（不发详情、不发 add-to-library、也不逐条查库）。
     // 逐条查 /i/library/search 是每条一次请求，几百个条目就是几百次 —— 这里改成先拉全库。
-    const lib = await libraryTitleSet(st);
+    progSet({ phase: '读库', done: 0, total: st.libPages || 40 });
+    const lib = await libraryTitleSet(st, (p) => progSet({ done: p.done, total: p.total }));
     await log(`Fab：库里有 ${lib.count} 条（翻了 ${lib.pages} 页${lib.truncated ? '，到页数上限了' : ''}）`);
 
     const h = await hist(K.fabHist);
@@ -589,6 +647,8 @@
     }
     const conc = Math.max(1, Math.min(8, Number(st.fabConcurrency) || 3));
     await log(`Fab：需要处理 ${todo.length} 个，并发 ${conc}（其余已在库或冷却中）`);
+    progStart('领取', todo.length);
+    progSet({ owned: ownedCount });
 
     // ── 2) 并发领取 ──
     async function claimOne(entry) {
@@ -680,10 +740,14 @@
         const rec = { title, state: 'claimed', at: Date.now(), offer, license: tier };
         if (until) rec.until = until;
         await setHist(K.fabHist, id, rec);
-        await log(`Fab：${upgrading ? '补领专业版' : '领到'} ${title.slice(0, 30)}〔${tierLabel}〕`, 'ok');
         dailyClaimed.push(title);
         lib.set.add(normT(title));
         done++;
+        progSet({ done: done + dailyFailed.length, claimed: done, failed: dailyFailed.length });
+        // 明细每 10 个记一条就够了，进度看上面那条线
+        if (done <= 2 || done % 10 === 0) {
+          await log(`Fab：已领 ${done} 个（最近：${title.slice(0, 24)}〔${tierLabel}〕）`, 'ok');
+        }
       } else if (authFail) {
         // 401 = 这个会话没登录/已过期，不是这一条的问题，别再拿后面的条目继续撞
         await setHist(K.fabHist, id, { title, state: 'needs-login', at: Date.now() });
@@ -696,6 +760,7 @@
         await setHist(K.fabHist, id, { title, state: 'failed', at: Date.now(), why });
         await log(`Fab：${title.slice(0, 26)} 失败 ${why}`, 'warn');
         dailyFailed.push({ title, reason: why });
+        progSet({ done: done + dailyFailed.length, claimed: done, failed: dailyFailed.length });
       }
     }
 
@@ -716,6 +781,7 @@
     }
     await Promise.all(Array.from({ length: conc }, () => worker()));
 
+    progEnd(`完成：领到 ${done} 个 · 已在库 ${ownedCount} · 无免费档 ${noTierCount} · 失败 ${dailyFailed.length}`);
     await log(`Fab：本轮结束 —— 新领 ${done} 个 / 已在库 ${ownedCount} 个 / 无免费档 ${noTierCount} 个 / 失败 ${dailyFailed.length} 个`);
     if (done) gmNotify(`本轮领取 ${done} 个 Fab 免费资产`, 'Fab 领取完成');
     await dailyPatch('fab', {
@@ -735,7 +801,7 @@
   // ── 一次性把整库标题拉成 Set ──
   // Fab 每页固定 24 条，用 cursors.next 翻；这样"这条在不在库里"是纯本地判断，
   // 已拥有的条目一个请求都不发（这是主人明确要的行为）。
-  async function libraryTitleSet(st) {
+  async function libraryTitleSet(st, onPage) {
     const set = new Set();
     const cap = Math.max(1, Math.min(40, st.libPages || 20));
     let cursor = '';
@@ -756,6 +822,7 @@
         if (t) set.add(t);
       }
       pages++;
+      if (onPage) onPage({ done: pages, total: Math.max(pages, Math.min(120, st.libPages || 40)) });
       cursor = (j.cursors && j.cursors.next) || '';
       if (!cursor || !rows.length) break;
       if (i === cap - 1 && cursor) truncated = true;
@@ -1271,10 +1338,10 @@
       section: '每轮上限',
       fields: [
         { k: 'maxEpicPerRun', type: 'num', label: 'Epic 每轮最多领', min: 1, max: 10, unit: '个' },
-        { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 200, unit: '个' },
-        { k: 'fabConcurrency', type: 'num', label: '并发领取数', min: 1, max: 8, unit: '个', hint: '1 = 一个一个领；4~6 大约快 3 倍，太高会被限流' },
-        { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 40, unit: '页', hint: '每页 24 条；Fab 上免费资产有几百个，只翻 1 页就只能看到 24 个' },
-        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 40, unit: '页', hint: '库里的条目越多这里要越大，否则老条目会被误判成"没领过"' },
+        { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 3000, unit: '个', hint: '想一次领完就拉到 2000+；每 100 个大约 30~60 秒' },
+        { k: 'fabConcurrency', type: 'num', label: '并发领取数', min: 1, max: 12, unit: '个', hint: '1 = 串行；6~8 大约快 5 倍，10+ 容易被限流' },
+        { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 120, unit: '页', hint: '每页 24 条，40 页 = 960 条；is_free=1 实测 1900+ 条，要全量就填 120' },
+        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 120, unit: '页', hint: '库里的条目越多这里要越大，否则老条目会被误判成"没领过"' },
       ],
     },
     {

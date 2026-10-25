@@ -37,7 +37,7 @@ const sandbox = {
   },
   location: { hostname: 'www.fab.com', search: '?efc=scan', pathname: '/limited-time-free' },
   getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
-  console, setTimeout, clearTimeout, URLSearchParams, FormData, Event, Date,
+  console, setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {}, URLSearchParams, FormData, Event, Date,
 };
 sandbox.window.document = sandbox.document;
 sandbox.window.location = sandbox.location;
