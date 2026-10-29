@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.9.5
+// @version      1.9.6
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -46,7 +46,7 @@
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
     ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.9.5';
+  const VERSION = '1.9.6';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -667,7 +667,11 @@
         continue;
       }
       // 手动扫描：失败/待登录的都重试；自动跑：needs-login 也不受冷却限制
-      if (prev && !claimed && prev.state !== 'needs-login' && !force && recentlyTried(prev, st.retryDays)) continue;
+      // 「无免费档」只是当时的判定，可能一天后就变了 —— 单独用 1 天冷却，别跟着 retryDays 睡一周
+      if (prev && !claimed && prev.state !== 'needs-login' && !force) {
+        const cool = prev.state === 'no-free-tier' ? Math.min(Number(st.retryDays) || 7, 1) : st.retryDays;
+        if (recentlyTried(prev, cool)) continue;
+      }
       todo.push({ id, title, prev, upgrading: claimed });
     }
     const conc = Math.max(1, Math.min(8, Number(st.fabConcurrency) || 3));

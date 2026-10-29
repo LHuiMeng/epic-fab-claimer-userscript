@@ -407,5 +407,45 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   check('这三条都记进「已在库」', (dailyE.owned || []).length === 3, JSON.stringify(dailyE.owned));
 }
 
+// ── 场景 F：「无免费档」只用 1 天冷却（限时免费会突然出现），别跟着 retryDays 睡一周 ──
+{
+  const NF_ID = 'f0000001-0000-4000-8000-000000000001';
+  const FAIL_ID = 'f0000002-0000-4000-8000-000000000002';
+  const rF = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+  let claimedF = [];
+  sandbox.fetch = async (url) => {
+    const u = String(url);
+    if (u === '/i/users/me') return rF(200, { displayName: 'RuinDream' });
+    if (u.startsWith('/i/library/search')) return rF(200, { results: [] });
+    if (u.includes('min_discount_percentage=100')) return rF(200, { results: [] });
+    if (u.includes('is_free=1')) {
+      return rF(200, { results: [
+        { uid: NF_ID, title: 'Late Freebie' },
+        { uid: FAIL_ID, title: 'Still Failing' },
+      ] });
+    }
+    if (u === `/i/listings/${NF_ID}`) {
+      return rF(200, { title: 'Late Freebie', licenses: [
+        { name: '个人', slug: 'personal', offerId: 'OFFER-NF', listingLicenseId: 'LL-NF', priceTier: { price: 0 } },
+      ] });
+    }
+    if (u.endsWith('/add-to-library')) { claimedF.push(u); return rF(204, {}); }
+    return rF(404, { detail: 'not stubbed ' + u });
+  };
+  store.set('efc:settings', {});
+  store.delete('efc:daily');
+  store.set('efc:log', []);
+  store.set('efc:last:fab', 0);   // 清掉「Fab 扫描冷却」，否则整轮直接 return
+  store.set('efc:fab:history', {
+    [NF_ID]: { title: 'Late Freebie', state: 'no-free-tier', at: Date.now() - 26 * 3600 * 1000 },
+    [FAIL_ID]: { title: 'Still Failing', state: 'failed', at: Date.now() - 26 * 3600 * 1000 },
+  });
+  await I.fabRun(false);   // 非 force：走冷却判定
+  const dailyF = (store.get('efc:daily') || {}).fab || {};
+  check('「无免费档」过 1 天就重试并补领', (dailyF.claimed || []).includes('Late Freebie'), JSON.stringify(dailyF.claimed));
+  check('「失败」仍按 retryDays 冷却，不重试', !(dailyF.claimed || []).includes('Still Failing'));
+  check('只对需要重试的那条发了 add-to-library', claimedF.length === 1, `次数 ${claimedF.length}`);
+}
+
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }
 console.log('\nFAB-FLOW PASS');
