@@ -14,9 +14,9 @@
    > 菜单里留了「🔁 备用镜像更新」一键切换。
 3. 先在浏览器里登录一次 Epic 和 Fab —— 脚本只用你已有的登录态
 
-> 装完**记得看面板标题**：写成 `Fab 免费资产 · v1.5.2` 才是新版。
-> 如果装到的是老版本（jsDelivr 的分支缓存最长 12 小时），用固定版本链接装一次：
-> `https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@9f40b03/epic-fab-claimer.user.js`
+> 装完**记得看面板标题**：写成 `Fab 免费资产 · v1.9.4` 才是当前版本（版本号会随更新变，对不上就是没更新到）。
+> 如果装到的是老版本（镜像有缓存），用固定 commit 链接装一次：
+> `https://fastly.jsdelivr.net/gh/LHuiMeng/epic-fab-claimer-userscript@48826cb/epic-fab-claimer.user.js`
 
 > 脚本自带 `@updateURL`（jsDelivr），作者推新版后 Tampermonkey 会自动更新（默认每 24 小时查一次，
 > 也可在扩展设置里把「检查更新」间隔调小）。手动更新：Tampermonkey 面板 → 本脚本 → 检查更新。
