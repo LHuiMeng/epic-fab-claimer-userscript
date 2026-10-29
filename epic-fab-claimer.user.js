@@ -1358,6 +1358,8 @@
   }
 
   function openListDrawer() {
+    // 宿主可能被站点重渲染掉（SPA 换页、整块替换），listUi 就悬空了 —— 每次先核实
+    if (listUi && !document.getElementById('efc-list-host')) listUi = null;
     if (listUi) { renderList(); return listUi; }
     if (!document.body) return null;
     const host = document.createElement('div');
