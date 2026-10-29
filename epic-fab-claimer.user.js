@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.9.0
+// @version      1.9.1
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -46,7 +46,7 @@
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
     ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.9.0';
+  const VERSION = '1.9.1';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -1216,6 +1216,15 @@
   // 队列去重，跑着的这一轮里新加的卡片会自己补上。
   const ownedQueue = [];
   let ownedPumping = false;
+  let cardStatsLogged = false;
+
+  async function logCardStats() {
+    if (cardStatsLogged || !cards.size) return;
+    cardStatsLogged = true;
+    let owned = 0;
+    for (const c of cards.values()) if (c.owned) owned++;
+    await log(`Fab：本页卡片 ${cards.size} 张 · 已在库里 ${owned} 张`);
+  }
 
   async function pumpOwned() {
     if (ownedPumping) return;
@@ -1234,7 +1243,10 @@
       }
     } finally {
       ownedPumping = false;
-      if (!ownedQueue.length) queueCardDetails().catch(() => {});
+      if (!ownedQueue.length) {
+        queueCardDetails().catch(() => {});
+        logCardStats().catch(() => {});
+      }
     }
   }
 
@@ -1281,13 +1293,10 @@
       }
     }
     for (const uid of Array.from(cards.keys())) if (!seen.has(uid)) cards.delete(uid);
+    if (added) cardStatsLogged = false;
     if (ownedQueue.length) pumpOwned().catch(() => {});
+    else logCardStats().catch(() => {});
     if (st.storeBadgeTiers && !ownedPumping && !ownedQueue.length) { queueCardDetails().catch(() => {}); }
-    if (added) {
-      let owned = 0;
-      for (const c of cards.values()) if (c.owned) owned++;
-      await log(`Fab：本页卡片 ${cards.size} 张 · 已在库里 ${owned} 张`);
-    }
     renderListIfOpen();
   }
 
