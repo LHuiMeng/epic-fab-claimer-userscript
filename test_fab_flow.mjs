@@ -32,7 +32,7 @@ const sandbox = {
     addEventListener() {},
   },
   document: {
-    body: mkEl(), createElement: () => mkEl(), cookie: 'fab_csrftoken=0123456789abcdef0123456789abcdef',
+    body: mkEl(), createElement: () => mkEl(), cookie: 'fab_csrftoken=00000000000000000000000000000000',   // 假的：真 token 不进仓库
     querySelector: () => null, querySelectorAll: () => [], readyState: 'complete',
   },
   location: { hostname: 'www.fab.com', search: '?efc=scan', pathname: '/limited-time-free' },
