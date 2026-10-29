@@ -300,7 +300,12 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   sandbox.fetch = async (url, opts = {}) => {
     const u = String(url);
     if (u === '/i/users/me') return rC(200, { displayName: 'RuinDream' });
-    if (u.startsWith('/i/library/search')) return rC(200, { results: [], cursors: { next: null } });
+    if (u.startsWith('/i/library/search')) {
+      // 真的拥有：库搜索能查到它（带 uid，走 uid 精确判定）
+      const q = decodeURIComponent((u.split('q=')[1] || '').split('&')[0]);
+      const hit = /Paid Pro Asset/i.test(q) ? [{ listing: { uid: PRO_ID, title: 'Paid Pro Asset' } }] : [];
+      return rC(200, { results: hit, cursors: { next: null } });
+    }
     if (u.includes('min_discount_percentage=100')) return rC(200, { results: [], cursors: { next: null } });
     if (u.includes('is_free=1')) {
       return rC(200, { results: [{ uid: PRO_ID, title: 'Paid Pro Asset' }], cursors: { next: null } });
@@ -330,6 +335,44 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   check('专业版仍要钱写了明细日志', /专业版仍要钱（本轮第 1 个）/.test(text), text.slice(-260));
   check('结束行点明该类跳过数量', /专业版仍要钱 1 个/.test(text), text.slice(-260));
   check('已有个人版没被重复下单', !text.includes('add-to-library'), text.slice(-200));
+}
+
+// ── 场景 D：历史记着「已领个人版」，但库里根本没有 → 必须补领（主人这次丢单的那类）──
+{
+  const LOST_ID = '10570570-0000-4000-8000-000000000001';
+  const rD = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+  let claimedD = 0;
+  sandbox.fetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === '/i/users/me') return rD(200, { displayName: 'RuinDream' });
+    if (u.startsWith('/i/library/search')) return rD(200, { results: [] });   // 库里没有
+    if (u.includes('min_discount_percentage=100')) return rD(200, { results: [] });
+    if (u.includes('is_free=1')) return rD(200, { results: [{ uid: LOST_ID, title: 'Female character head' }] });
+    if (u === `/i/listings/${LOST_ID}`) {
+      return rD(200, {
+        title: 'Female character head',
+        licenses: [
+          { name: '个人', slug: 'personal', offerId: 'OFFER-P', listingLicenseId: 'LL-P', priceTier: { price: 0 } },
+          { name: '专业', slug: 'professional', offerId: 'OFFER-PRO', listingLicenseId: 'LL-PRO', priceTier: { price: 19.93 } },
+        ],
+      });
+    }
+    if (u.endsWith('/add-to-library')) { claimedD++; return rD(204, {}); }
+    return rD(404, { detail: 'not stubbed ' + u });
+  };
+  store.set('efc:settings', {});
+  store.delete('efc:daily');
+  store.set('efc:log', []);
+  // 老版本按标题前缀误记的形状：state=claimed + license=个人，但从来没有 ownedCheckedAt
+  store.set('efc:fab:history', {
+    [LOST_ID]: { title: 'Female character head', state: 'claimed', license: '个人', at: Date.now() - 86400000 },
+  });
+  await I.fabRun(true);
+  const dailyD = (store.get('efc:daily') || {}).fab || {};
+  check('库里没有就必须补领（不被历史吞掉）', (dailyD.claimed || []).includes('Female character head'),
+    JSON.stringify(dailyD).slice(0, 160));
+  check('补领真的发了 add-to-library', claimedD === 1, `次数 ${claimedD}`);
+  check('没有误记成「专业版仍要钱」', dailyD.proStillPaid !== 1, `proStillPaid=${dailyD.proStillPaid}`);
 }
 
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }

@@ -148,13 +148,13 @@ const limitFree = {
     { text: '个人 ¥19.93 · 专业 ¥199.92', tone: 'warn' });
 }
 
-// ── 6. 标题比对：先全等、再 24 字前缀（库里标题常被截断）──
+// ── 6. 标题比对：只认完全相等（前缀匹配会误判「已在库」，把免费条目吞掉）──
 {
   checkTrue('sameTitle 全等', I.sameTitle('Coffee Table Round', 'Coffee Table Round'));
   checkTrue('sameTitle HTML 实体归一', I.sameTitle('Chair &amp; Desk Set Vol 2', 'Chair & Desk Set Vol 2'));
-  checkTrue('sameTitle 长标题按前缀命中',
+  checkTrue('sameTitle 前缀不同不算同一条',
     I.sameTitle('Modular Post Apocalyptic Desert Environment (Desert City,Desert Village)',
-      'Modular Post Apocalyptic Desert Environment (Desert City,Deser'));
+      'Modular Post Apocalyptic Desert Environment (Desert City,Deser') === false);
   checkTrue('sameTitle 不相干判否', I.sameTitle('Forest Terrain', 'Forest Terrain 2 Extra') === false);
   checkTrue('sameTitle 短标题不做前缀', I.sameTitle('Sofa V35', 'Sofa V35 Part7') === false);
 }

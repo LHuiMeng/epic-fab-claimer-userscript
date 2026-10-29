@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.9.1
+// @version      1.9.2
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -46,7 +46,7 @@
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
     ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.9.1';
+  const VERSION = '1.9.2';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -56,7 +56,7 @@
     retryDays: 7,        // Fab 失败条目的冷却天数
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
-    fabListPages: 40,    // Fab 免费列表翻几页（每页 24 条；is_free=1 实测 1900+ 条）
+    fabListPages: 120,   // Fab 免费列表翻几页（每页 24 条；is_free=1 实测 1900+ 条，40 页只有 960）
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
     notifyFail: true,    // 领取失败时发系统通知
@@ -616,6 +616,9 @@
       return;
     }
     await log(`Fab：免费候选 ${items.length} 个（翻了 ${listPages} 页${listTruncated ? '，到页数上限了' : ''}）`);
+    if (listTruncated) {
+      await log(`Fab：列表到页数上限（${st.fabListPages} 页 = ${st.fabListPages * 24} 条），后面的条目这轮没扫到 —— 想要全量就把「Fab 列表翻几页」拉到 120`, 'warn');
+    }
 
     // ── 不再整库扫一遍 ──
     // 仓库上千上万条时，翻页是几百次请求、几十秒起步，而且每次扫描都要重来。
@@ -633,54 +636,73 @@
 
     // ── 1) 本地先筛：只凭本地历史就能定的在这儿处理，一个请求都不发 ──
     const todo = [];
+    let recheck = 0;
     for (const it of items) {
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
-      if (prev && prev.state === 'claimed') {
-        // 已经领过：专业版在手 / 上次确认过在库（ownedOnly）→ 彻底不管
-        if (isProTier(prev.license) || prev.ownedOnly) {
+      const claimed = !!(prev && prev.state === 'claimed');
+      if (claimed && !force) {
+        // 真·专业版在手：不用再管（这是当初确实领到过的专业版）
+        if (isProTier(prev.license)) {
           dailyOwned.push(title);
           ownedCount++;
-          if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 领过（本地历史），跳过`);
+          if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 专业版在手（本地历史），跳过`);
           continue;
         }
-        // 当初拿的不是专业版 → 回头看一眼专业版现在免不免费
-        if (!force && prev.proCheckedAt && Date.now() - prev.proCheckedAt < st.retryDays * 864e5) {
+        // 只有「最近真的核对过库」+「最近查过专业版」才允许 0 请求跳过。
+        // 以前只看 state==='claimed' 就跳过，老版本按标题前缀误标的记录会把
+        // 「其实没领过」的免费条目永久吞掉 —— 主人这次丢的就是这一类。
+        const freshAfter = Date.now() - st.retryDays * 864e5;
+        const verifiedFresh = (Number(prev.ownedCheckedAt) || 0) > freshAfter;
+        const proFresh = (Number(prev.proCheckedAt) || 0) > freshAfter;
+        if (verifiedFresh && proFresh) {
           dailyOwned.push(title);
           ownedCount++;
+          if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 核对过在库（本地历史），跳过`);
           continue;
         }
         todo.push({ id, title, prev, upgrading: true });
+        recheck++;
         continue;
       }
       // 手动扫描：失败/待登录的都重试；自动跑：needs-login 也不受冷却限制
-      if (prev && prev.state !== 'needs-login' && !force && recentlyTried(prev, st.retryDays)) continue;
-      todo.push({ id, title, prev, upgrading: false });
+      if (prev && !claimed && prev.state !== 'needs-login' && !force && recentlyTried(prev, st.retryDays)) continue;
+      todo.push({ id, title, prev, upgrading: claimed });
     }
     const conc = Math.max(1, Math.min(8, Number(st.fabConcurrency) || 3));
-    await log(`Fab：需要处理 ${todo.length} 个，并发 ${conc}（其余已在库或冷却中）`);
+    await log(`Fab：需要处理 ${todo.length} 个，并发 ${conc}（其余专业版在手或冷却中）`);
+    if (recheck) {
+      await log(`Fab：其中 ${recheck} 条是「历史说领过、但没核对过库」的老记录 —— 本轮逐条核对，库里没有就补领`, 'warn');
+    }
     progStart('领取', todo.length);
     progSet({ owned: ownedCount });
 
     // ── 2) 并发领取 ──
     async function claimOne(entry) {
       const { id, title, prev, upgrading } = entry;
+      const now = Date.now();
 
       // 在不在库：一条候选一次轻量查询（不再整库扫）。
-      // 查不到（null）就照常领 —— add-to-library 对已拥有也回 204，不会下错单。
+      // true=在库 / false=确实没有 / null=查不了（401、网络、限流）
       const owned = await isOwned(id, title, st);
+      const proFresh = !!(prev && prev.proCheckedAt && now - prev.proCheckedAt < st.retryDays * 864e5);
       if (owned === true) {
-        await setHist(K.fabHist, id, {
-          title, state: 'claimed', verified: true, ownedOnly: true,
-          at: (prev && prev.at) || Date.now(),
-        });
-        dailyOwned.push(title);
-        ownedCount++;
-        progSet({ owned: ownedCount });
-        if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 已在库里，跳过`);
-        return;
+        // 在库：只有「想补专业版且好久没查过」才继续往下走，否则直接收工
+        if (!upgrading || proFresh) {
+          await setHist(K.fabHist, id, Object.assign({}, prev || {}, {
+            title, state: 'claimed', verified: true, ownedOnly: true,
+            ownedCheckedAt: now, at: (prev && prev.at) || now,
+          }));
+          dailyOwned.push(title);
+          ownedCount++;
+          progSet({ owned: ownedCount });
+          if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 已在库里，跳过`);
+          return;
+        }
       }
+      // owned === false：库里确实没有 —— 不管历史怎么写都按「没拥有」处理，正常领。
+      // owned === null：查不了，保守沿用历史（可能真领过），别重复下单。
 
       let offer = null;
       let tier = '';
@@ -717,12 +739,15 @@
         return;
       }
       const tierLabel = until ? `${tier}·限时到 ${new Date(until).toLocaleDateString('zh-CN')}` : tier;
-      if (upgrading && !isProTier(lic || tier)) {
+      // 只有「库里确认有它」或「查不了」时才按「已拥有个人版」跳过。
+      // owned === false 说明库里根本没有 —— 历史里的 claimed 是误记，照常领。
+      if (upgrading && owned !== false && !isProTier(lic || tier)) {
         // 专业版仍然要钱 → 保持个人版；记下检查时间，省得每轮都去问一遍
-        await setHist(K.fabHist, id, {
-          title, state: 'claimed', at: prev.at || Date.now(),
-          offer: prev.offer, license: prev.license, proCheckedAt: Date.now(),
-        });
+        await setHist(K.fabHist, id, Object.assign({}, prev || {}, {
+          title, state: 'claimed', at: (prev && prev.at) || now,
+          offer: prev && prev.offer, license: prev && prev.license, proCheckedAt: now,
+          ...(owned === true ? { ownedCheckedAt: now, ownedOnly: true } : {}),
+        }));
         proStillPaid++;
         // 前 3 条 + 每 20 条打一次明细，并把计数刷进进度条：这条分支以前是完全静默的，
         // 180 个待处理里 175 个走这里，面板却只写「新领 5 个」，看起来像脚本没干活。
@@ -773,7 +798,10 @@
         why = res.why || why;
       }
       if (ok) {
-        const rec = { title, state: 'claimed', at: Date.now(), offer, license: tier };
+        const rec = {
+          title, state: 'claimed', at: Date.now(), offer, license: tier,
+          ownedCheckedAt: Date.now(), proCheckedAt: Date.now(),
+        };
         if (until) rec.until = until;
         await setHist(K.fabHist, id, rec);
         dailyClaimed.push(title);
@@ -869,14 +897,13 @@
     }, 800);
   }
 
-  // 标题比对：先全等，再按 24 字前缀（库里的标题常被截断，卡片标题也可能被裁）
+  // 标题比对：只认归一化后完全相等。
+  // 宁可判「不在库」多领一次（add-to-library 对已拥有回 204，没有副作用），
+  // 也不要按前缀误判「已在库」把免费条目吞掉 —— 主人这次丢单就是这个原因。
   function sameTitle(a, b) {
     const x = normT(a);
     const y = normT(b);
-    if (!x || !y) return false;
-    if (x === y) return true;
-    if (x.length < 12 || y.length < 12) return false;
-    return x.slice(0, 24) === y.slice(0, 24);
+    return !!x && x === y;
   }
 
   // 返回 true=在库 / false=不在库 / null=查不了（401、网络、限流）
