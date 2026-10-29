@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.9.3
+// @version      1.9.4
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -46,7 +46,7 @@
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
     ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.9.3';
+  const VERSION = '1.9.4';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -924,6 +924,14 @@
       r = await fetch(`/i/library/search?q=${encodeURIComponent(String(title).slice(0, 48))}&count=5`, {
         credentials: 'include', headers: { Accept: 'application/json' },
       });
+      if (r && r.status === 429) {
+        // 第一轮核对老记录会连续问几百次，429 不处理就会把「不知道」当「不在库」去重复下单
+        const wait = Math.min(15000, Math.max(1500, Number(r.headers && r.headers.get && r.headers.get('Retry-After')) * 1000 || 3000));
+        await sleep(wait);
+        r = await fetch(`/i/library/search?q=${encodeURIComponent(String(title).slice(0, 48))}&count=5`, {
+          credentials: 'include', headers: { Accept: 'application/json' },
+        });
+      }
     } catch (e) { return null; }
     if (!r || !r.ok) return null;   // 查不了 ≠ 没有：交给领取流程兜底
     let j;

@@ -180,6 +180,16 @@ const limitFree = {
   sandbox.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) });
   checkTrue('isOwned 401 返回 null（不猜）',
     (await I.isOwned('dddd-4444', 'Something Else Entirely', { ownedCacheHours: 24 })) === null);
+
+  // 429：第一轮核对几百条时会被限流，退避重试一次，别把「不知道」当「不在库」
+  let n429 = 0;
+  sandbox.fetch = async () => {
+    n429++;
+    if (n429 === 1) return { ok: false, status: 429, headers: { get: () => '1' }, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => ({ results: [{ listing: { uid: 'eeee-5555', title: 'Retry Me' } }] }) };
+  };
+  const r429 = await I.isOwned('eeee-5555', 'Retry Me', { ownedCacheHours: 24 });
+  checkTrue('isOwned 429 退避重试一次后拿到结果', r429 === true && n429 === 2, `请求 ${n429} 次，结果 ${r429}`);
 }
 
 if (bad) { console.error(`\nCARDS FAIL: ${bad} 项不符`); process.exit(1); }
