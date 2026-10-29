@@ -323,7 +323,7 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   const realConsole = sandbox.console;
   sandbox.console = { log: (...a) => captured.push(a.join(' ')), warn: () => {}, error: () => {} };
   store.set('efc:settings', {});
-  store.set('efc:fab:history', { [PRO_ID]: { title: 'Paid Pro Asset', state: 'claimed', license: '个人', at: Date.now() } });
+  store.set('efc:fab:history', { [PRO_ID]: { title: 'Paid Pro Asset', state: 'claimed', license: '个人', offer: 'OFFER-OLD', at: Date.now() } });
   store.delete('efc:daily');
   await I.fabRun(true);
   sandbox.console = realConsole;
@@ -373,6 +373,38 @@ check('悬浮窗文案分得清「领到」和「领过了」',
     JSON.stringify(dailyD).slice(0, 160));
   check('补领真的发了 add-to-library', claimedD === 1, `次数 ${claimedD}`);
   check('没有误记成「专业版仍要钱」', dailyD.proStillPaid !== 1, `proStillPaid=${dailyD.proStillPaid}`);
+}
+
+// ── 场景 E：库确认在库、但不是我们领的（没有 offer）→ 不拉详情、不刷「专业版仍要钱」──
+{
+  const IDS = ['e0000001-0000-4000-8000-000000000001', 'e0000002-0000-4000-8000-000000000002', 'e0000003-0000-4000-8000-000000000003'];
+  const rE = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+  let detailE = 0;
+  const titles = { [IDS[0]]: 'Owned One', [IDS[1]]: 'Owned Two', [IDS[2]]: 'Owned Three' };
+  sandbox.fetch = async (url) => {
+    const u = String(url);
+    if (u === '/i/users/me') return rE(200, { displayName: 'RuinDream' });
+    if (u.startsWith('/i/library/search')) {
+      const q = decodeURIComponent((u.split('q=')[1] || '').split('&')[0]).toLowerCase();
+      const hit = Object.entries(titles).filter(([, t]) => t.toLowerCase() === q);
+      return rE(200, { results: hit.map(([uid, title]) => ({ listing: { uid, title } })) });
+    }
+    if (u.includes('min_discount_percentage=100')) return rE(200, { results: [] });
+    if (u.includes('is_free=1')) return rE(200, { results: IDS.map((uid) => ({ uid, title: titles[uid] })) });
+    if (u.startsWith('/i/listings/')) { detailE++; return rE(200, { title: 'x', licenses: [] }); }
+    return rE(404, { detail: 'not stubbed ' + u });
+  };
+  store.set('efc:settings', {});
+  store.delete('efc:daily');
+  store.set('efc:log', []);
+  store.set('efc:fab:history', Object.fromEntries(IDS.map((uid) => [uid, {
+    title: titles[uid], state: 'claimed', license: '个人', at: Date.now() - 86400000,
+  }])));
+  await I.fabRun(true);
+  const dailyE = (store.get('efc:daily') || {}).fab || {};
+  check('已在库的老记录不再逐条拉详情', detailE === 0, `详情请求 ${detailE} 次`);
+  check('汇总不再刷「专业版仍要钱」', (dailyE.proStillPaid || 0) === 0, `proStillPaid=${dailyE.proStillPaid}`);
+  check('这三条都记进「已在库」', (dailyE.owned || []).length === 3, JSON.stringify(dailyE.owned));
 }
 
 if (bad) { console.error(`\nFLOW FAIL: ${bad} 项不符`); process.exit(1); }

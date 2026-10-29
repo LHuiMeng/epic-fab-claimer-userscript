@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.9.2
+// @version      1.9.3
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
@@ -46,7 +46,7 @@
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
     ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.9.2';
+  const VERSION = '1.9.3';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -688,8 +688,13 @@
       const owned = await isOwned(id, title, st);
       const proFresh = !!(prev && prev.proCheckedAt && now - prev.proCheckedAt < st.retryDays * 864e5);
       if (owned === true) {
-        // 在库：只有「想补专业版且好久没查过」才继续往下走，否则直接收工
-        if (!upgrading || proFresh) {
+        // 只在「这条是我们自己领的个人版」时才回头查专业版。
+        // 库确认在库、但来历不明的老记录（没有我们自己记的 offer）就别去拉详情了 ——
+        // 否则第一轮会把 900 多条已在库的条目全查一遍，汇总里刷出几百条
+        // 「专业版仍要钱」，看着像出事，其实只是白跑。
+        const ours = !!(prev && prev.license && prev.offer);
+        const wantPro = upgrading && ours && !isProTier(prev.license) && !proFresh;
+        if (!wantPro) {
           await setHist(K.fabHist, id, Object.assign({}, prev || {}, {
             title, state: 'claimed', verified: true, ownedOnly: true,
             ownedCheckedAt: now, at: (prev && prev.at) || now,
