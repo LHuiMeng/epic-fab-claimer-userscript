@@ -141,7 +141,7 @@ check('悬浮窗文案分得清「领到」和「领过了」',
 // ── 领过日志开关：默认关（不刷屏），打开后才写 ──
 {
   const logs = store.get('efc:log') || [];
-  const hasOwnedLine = logs.some((l) => String(l.msg || '').includes('已在库里（领过了）'));
+  const hasOwnedLine = logs.some((l) => String(l.msg || '').includes('已在库里'));
   check('默认不写「领过了」日志', hasOwnedLine === false, `日志条数 ${logs.length}`);
 
   store.set('efc:fab:history', {});
@@ -150,7 +150,7 @@ check('悬浮窗文案分得清「领到」和「领过了」',
   await I.fabRun(true);
   const logs2 = store.get('efc:log') || [];
   check('开关打开后写「领过了」日志',
-    logs2.some((l) => String(l.msg || '').includes('已在库里（领过了）')),
+    logs2.some((l) => String(l.msg || '').includes('已在库里')),
     logs2.map((l) => l.msg).join(' / ').slice(0, 160));
 }
 
@@ -177,8 +177,10 @@ check('悬浮窗文案分得清「领到」和「领过了」',
       return r2(200, page(['Owned Alpha One', 'Owned Gamma Three'], 'c1'));
     }
     if (u.startsWith('/i/library/search')) {
-      if (u.includes('cursor=lib1')) return r2(200, page(OWNED.slice(2), null));
-      return r2(200, page(OWNED.slice(0, 2), 'lib1'));
+      // 新形状：逐条问 q=标题 → 命中就回一条带 uid 的（真实接口带 listing 对象）
+      const q = decodeURIComponent((u.split('q=')[1] || '').split('&')[0]).toLowerCase();
+      const hit = OWNED.filter((t) => t.toLowerCase() === q);
+      return r2(200, { results: hit.map((t) => ({ listing: { uid: 'u-' + t, title: t } })) });
     }
     if (u.includes('/add-to-library')) return r2(200, '{}');
     if (u === '/i/cart' ) return r2(200, { items: [], totalPrice: { discountPrice: 0 } });
@@ -211,9 +213,12 @@ check('悬浮窗文案分得清「领到」和「领过了」',
     `add-to-library 次数 ${calls2.filter((c) => c.includes('add-to-library')).length}`);
   check('已拥有的条目没发详情请求',
     !OWNED.some((t) => calls2.some((c) => c.startsWith('GET /i/listings/u-' + t))));
-  check('库只按页拉了 2 次（不是每条一次）',
-    calls2.filter((c) => c.startsWith('GET /i/library/search')).length === 2,
-    calls2.filter((c) => c.startsWith('GET /i/library/search')).join(' | '));
+  const libCalls = calls2.filter((c) => c.startsWith('GET /i/library/search'));
+  check('没有整库翻页（只有 q= 单条查询）',
+    libCalls.every((c) => c.includes('q=')),
+    libCalls.join(' | '));
+  check('每个候选只问一次库（5 个候选 = 5 次）',
+    libCalls.length === 5, `${libCalls.length} 次：` + libCalls.join(' | '));
   check('列表按页翻（is_free 3 页 + 100% 折扣 1 页 = 4 次）',
     calls2.filter((c) => c.startsWith('GET /i/listings/search')).length === 4,
     String(calls2.filter((c) => c.startsWith('GET /i/listings/search')).length));

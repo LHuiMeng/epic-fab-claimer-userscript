@@ -43,10 +43,10 @@
     daily: 'efc:daily',        // 当天汇总（跨标签共享）
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
-    libCache: 'efc:fab:libcache',   // 库标题集合缓存（商店页标注用，默认 24h）
     cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
+    ownedCache: 'efc:fab:owned',    // 单条「在不在库」查询结果缓存（uid → {at, owned}）
   };
-  const VERSION = '1.8.0';
+  const VERSION = '1.9.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -57,7 +57,6 @@
     epicRetryMinutes: 120, // Epic 未领到的条目多久重试一次（限时免费等不起 7 天）
     logOwned: false,     // 已在库（领过了）的条目要不要写日志；默认不写，免得刷屏
     fabListPages: 40,    // Fab 免费列表翻几页（每页 24 条；is_free=1 实测 1900+ 条）
-    libPages: 80,        // 拉库时翻几页（每页 24 条）；库 1500+ 条 = 64 页，翻少了会误判
     toastEnabled: true,  // 右下角浮窗总开关
     toastMaxPerDay: 3,   // 每天最多主动弹几次（0 = 只写面板/日志）
     notifyFail: true,    // 领取失败时发系统通知
@@ -66,7 +65,7 @@
     fabScanHours: 6,     // Fab 自动领的间隔
     storeBadges: true,   // Fab 商店列表卡片标注（已在库 / 档位价格）
     storeBadgeTiers: true, // 对可视区卡片补详情拿个人/专业档位价格（有缓存）
-    libCacheHours: 24,   // 库标题集合缓存多久重建一次
+    ownedCacheHours: 24, // 单条「在不在库」查询结果缓存多久（命中就 0 请求）
   };
   const FREE_API = 'https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions'
     + '?locale=zh-CN&country=CN&allowCountries=CN';
@@ -618,13 +617,10 @@
     }
     await log(`Fab：免费候选 ${items.length} 个（翻了 ${listPages} 页${listTruncated ? '，到页数上限了' : ''}）`);
 
-    // ── 库：一次翻完，本地比对 ──
-    // 关键：已经在库里的条目**一个请求都不发**（不发详情、不发 add-to-library、也不逐条查库）。
-    // 逐条查 /i/library/search 是每条一次请求，几百个条目就是几百次 —— 这里改成先拉全库。
-    progSet({ phase: '读库', done: 0, total: st.libPages || 40 });
-    const lib = await libSnapshot(st, { force: true, onPage: (p) => progSet({ done: p.done, total: p.total }) });
-    await log(`Fab：库里有 ${lib.count} 条（翻了 ${lib.pages} 页${lib.truncated ? '，到页数上限了' : ''}）`);
-
+    // ── 不再整库扫一遍 ──
+    // 仓库上千上万条时，翻页是几百次请求、几十秒起步，而且每次扫描都要重来。
+    // 现在只在「要领取之前」逐条问一次 /i/library/search（1 个候选 1 次请求），
+    // 本地历史已经记过「领过」的直接跳过（0 请求）。
     const h = await hist(K.fabHist);
     let done = 0;
     let ownedCount = 0;
@@ -635,29 +631,32 @@
     const dailyFailed = [];
     let authFailStop = false;
 
-    // ── 1) 本地先筛：不发任何请求就能确定跳过的都在这儿处理 ──
+    // ── 1) 本地先筛：只凭本地历史就能定的在这儿处理，一个请求都不发 ──
     const todo = [];
     for (const it of items) {
       const id = it.uid || it.id;
       const title = it.title || '(无标题)';
       const prev = h[id];
-      if (libHas(lib, title)) {
-        await setHist(K.fabHist, id, { title, state: 'claimed', verified: true, at: (prev && prev.at) || Date.now() });
-        dailyOwned.push(title);
-        ownedCount++;
-        if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 已在库里（领过了），跳过`);
+      if (prev && prev.state === 'claimed') {
+        // 已经领过：专业版在手 / 上次确认过在库（ownedOnly）→ 彻底不管
+        if (isProTier(prev.license) || prev.ownedOnly) {
+          dailyOwned.push(title);
+          ownedCount++;
+          if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 领过（本地历史），跳过`);
+          continue;
+        }
+        // 当初拿的不是专业版 → 回头看一眼专业版现在免不免费
+        if (!force && prev.proCheckedAt && Date.now() - prev.proCheckedAt < st.retryDays * 864e5) {
+          dailyOwned.push(title);
+          ownedCount++;
+          continue;
+        }
+        todo.push({ id, title, prev, upgrading: true });
         continue;
       }
-      let upgrading = false;
-      if (prev && prev.state === 'claimed') {
-        // 已经领过：只有在「当初拿的不是专业版」时才回头补专业版，别重复下单
-        if (isProTier(prev.license)) continue;
-        if (!force && prev.proCheckedAt && Date.now() - prev.proCheckedAt < st.retryDays * 864e5) continue;
-        upgrading = true;
-      }
       // 手动扫描：失败/待登录的都重试；自动跑：needs-login 也不受冷却限制
-      if (prev && prev.state !== 'claimed' && !force && prev.state !== 'needs-login' && recentlyTried(prev, st.retryDays)) continue;
-      todo.push({ id, title, prev, upgrading });
+      if (prev && prev.state !== 'needs-login' && !force && recentlyTried(prev, st.retryDays)) continue;
+      todo.push({ id, title, prev, upgrading: false });
     }
     const conc = Math.max(1, Math.min(8, Number(st.fabConcurrency) || 3));
     await log(`Fab：需要处理 ${todo.length} 个，并发 ${conc}（其余已在库或冷却中）`);
@@ -667,6 +666,22 @@
     // ── 2) 并发领取 ──
     async function claimOne(entry) {
       const { id, title, prev, upgrading } = entry;
+
+      // 在不在库：一条候选一次轻量查询（不再整库扫）。
+      // 查不到（null）就照常领 —— add-to-library 对已拥有也回 204，不会下错单。
+      const owned = await isOwned(id, title, st);
+      if (owned === true) {
+        await setHist(K.fabHist, id, {
+          title, state: 'claimed', verified: true, ownedOnly: true,
+          at: (prev && prev.at) || Date.now(),
+        });
+        dailyOwned.push(title);
+        ownedCount++;
+        progSet({ owned: ownedCount });
+        if (st.logOwned) await log(`Fab：${title.slice(0, 26)} 已在库里，跳过`);
+        return;
+      }
+
       let offer = null;
       let tier = '';
       let lic = null;
@@ -762,7 +777,7 @@
         if (until) rec.until = until;
         await setHist(K.fabHist, id, rec);
         dailyClaimed.push(title);
-        lib.set.add(normT(title));
+        ownedCacheSet(id, true);
         done++;
         progSet({ done: done + dailyFailed.length, claimed: done, failed: dailyFailed.length });
         // 领到谁就报谁：每一条都写完整标题，不做「每 10 个才报一次」的压缩
@@ -826,76 +841,72 @@
       .replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
-  // ── 一次性把整库标题拉成 Set ──
-  // Fab 每页固定 24 条，用 cursors.next 翻；这样"这条在不在库里"是纯本地判断，
-  // 已拥有的条目一个请求都不发（这是主人明确要的行为）。
-  async function libraryTitleSet(st, onPage) {
-    const set = new Set();
-    // 上限必须跟设置走：库已 1500+ 条（=64 页），曾经硬砍到 40 页，
-    // 老条目读不到就会被误判成「没领过」，白发详情请求。
-    const cap = Math.max(1, Math.min(200, st.libPages || 20));
-    let cursor = '';
-    let pages = 0;
-    let truncated = false;
-    for (let i = 0; i < cap; i++) {
-      const url = `/i/library/search?count=24` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
-      let r;
-      try {
-        r = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
-      } catch (e) { break; }
-      if (!r.ok) break;
-      let j;
-      try { j = await r.json(); } catch (e) { break; }
-      const rows = j.results || [];
-      for (const row of rows) {
-        const t = normT((row.listing && row.listing.title) || row.title || '');
-        if (t) set.add(t);
+  // ── 在不在库：单条查，不再整库扫 ──
+  // 仓库可能上万条，翻页要几百次请求、几十秒起步；而「问一个标题」的代价是恒定的。
+  // 结果按 uid 缓存（默认 24h）：重复浏览、重复扫描都不再发请求。
+  let ownedMem = null;
+  let ownedFlush = null;
+
+  async function ownedCacheGet() {
+    if (ownedMem) return ownedMem;
+    const raw = await gmGet(K.ownedCache, {});
+    ownedMem = (raw && typeof raw === 'object') ? raw : {};
+    return ownedMem;
+  }
+
+  function ownedCacheSet(uid, owned) {
+    if (!ownedMem) ownedMem = {};
+    ownedMem[uid] = { at: Date.now(), owned: !!owned };
+    if (ownedFlush) return;
+    ownedFlush = setTimeout(async () => {
+      ownedFlush = null;
+      const keys = Object.keys(ownedMem);
+      if (keys.length > 3000) {
+        keys.sort((a, b) => (ownedMem[a].at || 0) - (ownedMem[b].at || 0));
+        for (const k of keys.slice(0, keys.length - 3000)) delete ownedMem[k];
       }
-      pages++;
-      if (onPage) onPage({ done: pages, total: Math.max(pages, Math.min(120, st.libPages || 40)) });
-      cursor = (j.cursors && j.cursors.next) || '';
-      if (!cursor || !rows.length) break;
-      if (i === cap - 1 && cursor) truncated = true;
-    }
-    return { set, count: set.size, pages, truncated };
+      await gmSet(K.ownedCache, ownedMem);
+    }, 800);
   }
 
-  // 库里的标题常被截断，所以先全等比，再按 24 字前缀比
-  function libHas(lib, title) {
-    const want = normT(title);
-    if (!want) return false;
-    if (lib.set.has(want)) return true;
-    const head = want.slice(0, 24);
-    if (head.length < 12) return false;
-    for (const t of lib.set) {
-      if (t.startsWith(head)) return true;
-      if (t.length >= 12 && head.startsWith(t.slice(0, 24))) return true;
-    }
-    return false;
+  // 标题比对：先全等，再按 24 字前缀（库里的标题常被截断，卡片标题也可能被裁）
+  function sameTitle(a, b) {
+    const x = normT(a);
+    const y = normT(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    if (x.length < 12 || y.length < 12) return false;
+    return x.slice(0, 24) === y.slice(0, 24);
   }
 
-  // ── 库集合快照：落 GM 缓存，商店页标注不必每次重翻 60+ 页 ──
-  // fabRun 用 force 拿最新（领取判定不要用旧库存）；标注用缓存（默认 24h）。
-  async function libSnapshot(st, opts) {
-    const o = opts || {};
-    const maxAge = Math.max(1, Number(st.libCacheHours) || 24) * 3600000;
-    const cached = await gmGet(K.libCache, null);
-    if (!o.force && cached && Array.isArray(cached.titles) && Date.now() - (cached.at || 0) < maxAge) {
-      // 读回来一律再过一遍 normT：缓存可能是旧版本/手改/别的路径写的，
-      // 没归一化就会跟 libHas 的 normT 对不上（大小写、&amp; 全变成「没领过」）。
-      const titles = cached.titles.map((t) => normT(t)).filter(Boolean);
-      return {
-        set: new Set(titles), count: titles.length, at: cached.at || 0,
-        cached: true, pages: cached.pages || 0, truncated: !!cached.truncated,
-      };
+  // 返回 true=在库 / false=不在库 / null=查不了（401、网络、限流）
+  // 库里带 listing.uid 就按 uid 精确判；不带才退回标题比对。
+  async function isOwned(uid, title, st) {
+    const ttl = Math.max(1, Number(st && st.ownedCacheHours) || 24) * 3600000;
+    const cache = await ownedCacheGet();
+    const hit = cache[uid];
+    if (hit && Date.now() - (hit.at || 0) < ttl) return hit.owned;
+    if (!title) return null;
+    let r;
+    try {
+      r = await fetch(`/i/library/search?q=${encodeURIComponent(String(title).slice(0, 48))}&count=5`, {
+        credentials: 'include', headers: { Accept: 'application/json' },
+      });
+    } catch (e) { return null; }
+    if (!r || !r.ok) return null;   // 查不了 ≠ 没有：交给领取流程兜底
+    let j;
+    try { j = await r.json(); } catch (e) { return null; }
+    const rows = ((j && j.results) || []).map((x) => (x && x.listing) || x).filter(Boolean);
+    const withUid = rows.filter((l) => l && l.uid);
+    let owned;
+    if (withUid.length) {
+      const want = String(uid || '').toLowerCase();
+      owned = withUid.some((l) => String(l.uid).toLowerCase() === want);
+    } else {
+      owned = rows.some((l) => sameTitle(l.title, title));
     }
-    const lib = await libraryTitleSet(st, o.onPage);
-    const rec = {
-      at: Date.now(), titles: Array.from(lib.set), count: lib.count,
-      pages: lib.pages, truncated: lib.truncated,
-    };
-    await gmSet(K.libCache, rec);
-    return { set: lib.set, count: lib.count, at: rec.at, cached: false, pages: lib.pages, truncated: lib.truncated };
+    ownedCacheSet(uid, owned);
+    return owned;
   }
 
   // 限时免费专用：走购物车结算。**任何一个环节不是 0 元就撤单**，绝不动钱。
@@ -961,8 +972,6 @@
   const cards = new Map();   // uid -> {uid, root, title, owned, price, tiers, freeUntil, requested}
   let cardTimer = null;
   let cardObs = null;
-  let cardLib = null;
-  let cardLibBuilding = null;
   let cardMem = null;
   let cardFlush = null;
   let cardDetailBusy = 0;
@@ -1047,7 +1056,7 @@
       }
       return null;
     }
-    if (info.price && info.price.state === 'free') return { text: '免费', tone: 'ok' };
+    // 没档位数据时不再猜：卡片自己已经写了 Free* / 价格，重复标「免费」只是噪音
     return null;
   }
 
@@ -1178,7 +1187,7 @@
     const cache = await cardCacheGet();
     const todo = [];
     for (const c of cards.values()) {
-      if (c.owned) continue;
+      if (!c.known || c.owned) continue;   // 库状态还没定就先别查详情（省一半请求）
       const hit = cache[c.uid];
       if (hit && Date.now() - (hit.at || 0) < CARD_TTL) {
         c.tiers = hit.tiers || null;
@@ -1203,32 +1212,39 @@
     }
   }
 
-  async function ensureCardLib(st) {
-    const maxAge = Math.max(1, Number(st.libCacheHours) || 24) * 3600000;
-    if (cardLib && Date.now() - cardLib.at < maxAge) return cardLib;
-    if (cardLibBuilding) return cardLibBuilding;
-    cardLibBuilding = (async () => {
-      try {
-        const lib = await libSnapshot(st, {});
-        cardLib = lib;
-        await log(`Fab：库集合 ${lib.count} 条（${lib.cached ? '用缓存' : '刚翻 ' + lib.pages + ' 页'}）`);
-        return lib;
-      } catch (e) {
-        await log('Fab：读库失败，卡片标注先停 —— ' + e.message, 'warn');
-        return null;
-      } finally {
-        cardLibBuilding = null;
+  // 逐条问库：只有「本地历史没有、缓存也没有」的卡片才发请求，并发 3。
+  // 队列去重，跑着的这一轮里新加的卡片会自己补上。
+  const ownedQueue = [];
+  let ownedPumping = false;
+
+  async function pumpOwned() {
+    if (ownedPumping) return;
+    ownedPumping = true;
+    const st = await settings();
+    try {
+      while (ownedQueue.length) {
+        const c = ownedQueue.shift();
+        if (!c || !cards.has(c.uid)) continue;
+        const res = await isOwned(c.uid, c.title, st);
+        // null = 查不了：按「不知道」处理，不标已在库，但也别卡着不查详情
+        c.owned = res === true;
+        c.known = true;
+        paintCard(c);
+        renderListIfOpen();
       }
-    })();
-    return cardLibBuilding;
+    } finally {
+      ownedPumping = false;
+      if (!ownedQueue.length) queueCardDetails().catch(() => {});
+    }
   }
 
   async function sweepCards() {
     if (!document.body) return;
     const st = await settings();
     if (!st.storeBadges) return;
-    const lib = await ensureCardLib(st);
-    if (!lib) return;
+    const h = await hist(K.fabHist);
+    const cache = await ownedCacheGet();
+    const ttl = Math.max(1, Number(st.ownedCacheHours) || 24) * 3600000;
     const seen = new Set();
     let added = 0;
     for (const a of document.querySelectorAll(CARD_LINK)) {
@@ -1239,10 +1255,18 @@
       if (!root) continue;
       const prev = cards.get(uid);
       const c = (prev && prev.root === root) ? prev
-        : { uid, root, title: '', owned: false, price: null, tiers: null, freeUntil: 0, requested: false };
+        : { uid, root, title: '', owned: false, known: false, price: null, tiers: null, freeUntil: 0, requested: false };
       if (c.root !== root) { c.root = root; c.requested = false; }
       c.title = titleOfCard(a);
-      c.owned = libHas(lib, c.title);
+      // 在不在库：先看本地历史（领过就是领过，0 请求），再看 24h 缓存
+      const hist1 = h[uid];
+      let owned = null;
+      if (hist1 && hist1.state === 'claimed' && hist1.verified) owned = true;
+      else {
+        const hit = cache[uid];
+        if (hit && Date.now() - (hit.at || 0) < ttl) owned = hit.owned === true;
+      }
+      if (owned !== null) { c.owned = owned; c.known = true; }
       if (!c.price) {
         const row = priceRowOf(root);
         const delEl = root.querySelector ? root.querySelector('del') : null;
@@ -1251,9 +1275,14 @@
       if (!prev) added++;
       cards.set(uid, c);
       paintCard(c);
+      if (owned === null && !c.queued && isOnScreen(root)) {
+        c.queued = true;
+        ownedQueue.push(c);
+      }
     }
     for (const uid of Array.from(cards.keys())) if (!seen.has(uid)) cards.delete(uid);
-    if (st.storeBadgeTiers) { queueCardDetails().catch(() => {}); }
+    if (ownedQueue.length) pumpOwned().catch(() => {});
+    if (st.storeBadgeTiers && !ownedPumping && !ownedQueue.length) { queueCardDetails().catch(() => {}); }
     if (added) {
       let owned = 0;
       for (const c of cards.values()) if (c.owned) owned++;
@@ -1866,7 +1895,6 @@
         { k: 'maxFabPerRun', type: 'num', label: 'Fab 每轮最多领', min: 1, max: 3000, unit: '个', hint: '想一次领完就拉到 2000+；每 100 个大约 30~60 秒' },
         { k: 'fabConcurrency', type: 'num', label: '并发领取数', min: 1, max: 12, unit: '个', hint: '1 = 串行；6~8 大约快 5 倍，10+ 容易被限流' },
         { k: 'fabListPages', type: 'num', label: 'Fab 列表翻几页', min: 1, max: 120, unit: '页', hint: '每页 24 条，40 页 = 960 条；is_free=1 实测 1900+ 条，要全量就填 120' },
-        { k: 'libPages', type: 'num', label: '读库翻几页', min: 1, max: 200, unit: '页', hint: '每页 24 条；库现在 1500+ 条 = 64 页，翻少了老条目会被误判成"没领过"' },
       ],
     },
     {
@@ -1883,7 +1911,7 @@
       fields: [
         { k: 'storeBadges', type: 'bool', label: 'Fab 列表页标注已在库/价格', hint: '卡片上直接显示「已在库」「个人免费 · 专业 ¥X」' },
         { k: 'storeBadgeTiers', type: 'bool', label: '补详情看个人/专业档位', hint: '只查可视区卡片，结果缓存 12h；关掉只看已在库' },
-        { k: 'libCacheHours', type: 'num', label: '库缓存有效期', min: 1, max: 168, unit: '小时', hint: '过期后第一次浏览 Fab 会重翻一遍库' },
+        { k: 'ownedCacheHours', type: 'num', label: '在库查询缓存', min: 1, max: 168, unit: '小时', hint: '同一个资产多久内不重复问库；0 请求复用的关键' },
       ],
     },
     {
@@ -2267,7 +2295,7 @@
   }
 
   // 给离线自测留出口（node 里 stub 一个 window 就能验纯逻辑，不影响正常使用）
-  window.__efcInternals = { DEF_SETTINGS, SETTINGS_SCHEMA, normalizeSettings, openSettings, VERSION, freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines, parseCardPrice, badgeFor, tierSummary, formatMoney, sweepCards, openListDrawer, cards, libHas, normT, libraryTitleSet, libSnapshot };
+  window.__efcInternals = { DEF_SETTINGS, SETTINGS_SCHEMA, normalizeSettings, openSettings, VERSION, freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines, parseCardPrice, badgeFor, tierSummary, formatMoney, sweepCards, openListDrawer, cards, normT, sameTitle, isOwned, ownedCacheGet };
 
   mountSettingsMenu();
 

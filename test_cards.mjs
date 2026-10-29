@@ -148,59 +148,38 @@ const limitFree = {
     { text: '个人 ¥19.93 · 专业 ¥199.92', tone: 'warn' });
 }
 
-// ── 6. 库标题匹配：真实库里带 & 与截断的标题 ──
+// ── 6. 标题比对：先全等、再 24 字前缀（库里标题常被截断）──
 {
-  const lib = { set: new Set([
-    I.normT('Coffee Table Round'),
-    I.normT('Chair & Desk Set Vol 2'),
-    I.normT('Modular Post Apocalyptic Desert Environment (Desert City,Desert Village)'),
-  ]) };
-  checkTrue('libHas 精确命中', I.libHas(lib, 'Coffee Table Round'));
-  checkTrue('libHas HTML 实体归一（&amp;）', I.libHas(lib, 'Chair &amp; Desk Set Vol 2'));
-  checkTrue('libHas 长标题按前缀命中', I.libHas(lib, 'Modular Post Apocalyptic Desert Environment (Desert City,Deser'));
-  checkTrue('libHas 没领过的判否', I.libHas(lib, 'Forest Terrain') === false);
+  checkTrue('sameTitle 全等', I.sameTitle('Coffee Table Round', 'Coffee Table Round'));
+  checkTrue('sameTitle HTML 实体归一', I.sameTitle('Chair &amp; Desk Set Vol 2', 'Chair & Desk Set Vol 2'));
+  checkTrue('sameTitle 长标题按前缀命中',
+    I.sameTitle('Modular Post Apocalyptic Desert Environment (Desert City,Desert Village)',
+      'Modular Post Apocalyptic Desert Environment (Desert City,Deser'));
+  checkTrue('sameTitle 不相干判否', I.sameTitle('Forest Terrain', 'Forest Terrain 2 Extra') === false);
+  checkTrue('sameTitle 短标题不做前缀', I.sameTitle('Sofa V35', 'Sofa V35 Part7') === false);
 }
 
-// ── 7. 读库页数上限必须跟设置走（曾经硬砍到 40 页）──
+// ── 7. isOwned：单条问库（uid 优先、标题兜底、缓存 0 请求、查不了返回 null）──
 {
-  const st = { libPages: 64, libCacheHours: 24 };
-  let pages = 0;
-  sandbox.fetch = async () => {
-    pages++;
-    return {
-      ok: true,
-      json: async () => ({
-        results: [{ listing: { title: 'T' + pages } }],
-        cursors: { next: pages < 64 ? 'c' + pages : '' },
-      }),
-    };
-  };
-  const lib = await I.libraryTitleSet(st);
-  checkTrue('libraryTitleSet 翻满 64 页', pages === 64 && lib.pages === 64, `实际 ${pages} 页 / ${lib.count} 条`);
-  // 设置里给的上限仍然要夹住（防手改成 9999）：这次让游标永远有下一页
-  pages = 0;
-  sandbox.fetch = async () => {
-    pages++;
-    return {
-      ok: true,
-      json: async () => ({ results: [{ listing: { title: 'T' + pages } }], cursors: { next: 'more' } }),
-    };
-  };
-  const lib2 = await I.libraryTitleSet({ libPages: 9999, libCacheHours: 24 });
-  checkTrue('libraryTitleSet 上限夹到 200', pages === 200 && lib2.pages === 200, `实际 ${pages} 页`);
-}
+  let calls = 0;
+  const serve = (rows) => { sandbox.fetch = async () => { calls++; return { ok: true, json: async () => ({ results: rows }) }; }; };
 
-// ── 8. 库缓存读回来必须再归一化一遍（否则大小写 / &amp; 全被当成「没领过」）──
-{
-  const orig = sandbox.window.GM_getValue;
-  sandbox.window.GM_getValue = (k, d) => (k === 'efc:fab:libcache'
-    ? { at: Date.now(), titles: ['Sofa V35 Part7', 'Chair &amp; Desk'] }
-    : d);
-  const lib = await I.libSnapshot({ libPages: 64, libCacheHours: 24 }, {});
-  checkTrue('libSnapshot 读缓存时归一化标题',
-    lib.set.has('sofa v35 part7') && lib.set.has('chair & desk') && lib.cached === true,
-    Array.from(lib.set).join(' | '));
-  sandbox.window.GM_getValue = orig;
+  serve([{ listing: { uid: 'AAAA-1111', title: 'Coffee Table Round' } }]);
+  checkTrue('isOwned 按 uid 命中', (await I.isOwned('aaaa-1111', 'Coffee Table Round', { ownedCacheHours: 24 })) === true);
+  checkTrue('isOwned 同标题不同 uid 判否',
+    (await I.isOwned('bbbb-2222', 'Coffee Table Round', { ownedCacheHours: 24 })) === false);
+
+  serve([{ listing: { title: 'Chair &amp; Desk Set Vol 2' } }]);
+  checkTrue('isOwned 没 uid 时按标题比',
+    (await I.isOwned('cccc-3333', 'Chair & Desk Set Vol 2', { ownedCacheHours: 24 })) === true);
+
+  const before = calls;
+  await I.isOwned('aaaa-1111', 'Coffee Table Round', { ownedCacheHours: 24 });
+  checkTrue('isOwned 命中缓存不发请求', calls === before, `多发了 ${calls - before} 次`);
+
+  sandbox.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) });
+  checkTrue('isOwned 401 返回 null（不猜）',
+    (await I.isOwned('dddd-4444', 'Something Else Entirely', { ownedCacheHours: 24 })) === null);
 }
 
 if (bad) { console.error(`\nCARDS FAIL: ${bad} 项不符`); process.exit(1); }
