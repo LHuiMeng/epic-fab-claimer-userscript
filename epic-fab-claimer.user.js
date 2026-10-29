@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.7.3
-// @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报，点 ✕ 当天不再提醒。
+// @version      1.8.0
+// @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
 // @supportURL   https://github.com/LHuiMeng/epic-fab-claimer-userscript/issues
@@ -43,8 +43,10 @@
     daily: 'efc:daily',        // 当天汇总（跨标签共享）
     toastOff: 'efc:toastOff',  // 用户点 X 的日期，当天不再弹
     toastShown: 'efc:toastShown', // 当天已弹次数，别每开一个标签就弹一次
+    libCache: 'efc:fab:libcache',   // 库标题集合缓存（商店页标注用，默认 24h）
+    cardCache: 'efc:fab:cardcache', // 卡片档位价格缓存（12h，别每次刷新都打详情接口）
   };
-  const VERSION = '1.7.3';
+  const VERSION = '1.8.0';
   const DEF_SETTINGS = {
     autoEpic: true,      // 每日首次自动扫 Epic
     autoFab: true,       // 打开 Fab 时自动领
@@ -62,6 +64,9 @@
     dryRun: false,       // 只扫描不点领取
     epicScanHours: 24,   // Epic 自动扫的间隔
     fabScanHours: 6,     // Fab 自动领的间隔
+    storeBadges: true,   // Fab 商店列表卡片标注（已在库 / 档位价格）
+    storeBadgeTiers: true, // 对可视区卡片补详情拿个人/专业档位价格（有缓存）
+    libCacheHours: 24,   // 库标题集合缓存多久重建一次
   };
   const FREE_API = 'https://store-site-backend-static-ipv4.ak.epicgames.com/freeGamesPromotions'
     + '?locale=zh-CN&country=CN&allowCountries=CN';
@@ -250,7 +255,7 @@
         <div class="hd"><span class="dot"></span><b></b><span class="mini">–</span></div>
         <div class="bd">
           <div class="row"><button data-act="scan">立即扫描本轮</button><button data-act="clear">清日志</button></div>
-          <div class="row"><button data-act="openSettings">⚙ 设置</button></div>
+          <div class="row"><button data-act="openSettings">⚙ 设置</button><button data-act="list">📋 清单</button></div>
           <div class="row"><button data-act="logowned">领过日志：关</button></div>
           <div class="progwrap"><div class="bar"><i></i></div><div class="ptxt">空闲</div></div>
           <div id="log"></div>
@@ -277,7 +282,10 @@
         }).join('');
         logEl.scrollTop = logEl.scrollHeight;
         const st = await settings();
-        hintEl.textContent = `${location.hostname} · Epic ${st.autoEpic ? '开' : '关'} / Fab ${st.autoFab ? '开' : '关'}${st.dryRun ? ' · 仅扫描' : ''}`;
+        const cardStat = (location.hostname.endsWith('fab.com') && cards.size)
+          ? ` · 本页 ${cards.size} 张 · 已在库 ${Array.from(cards.values()).filter((c) => c.owned).length}`
+          : '';
+        hintEl.textContent = `${location.hostname} · Epic ${st.autoEpic ? '开' : '关'} / Fab ${st.autoFab ? '开' : '关'}${st.dryRun ? ' · 仅扫描' : ''}${cardStat}`;
         const btnOwned = root.querySelector('[data-act="logowned"]');
         if (btnOwned) btnOwned.textContent = `领过日志：${st.logOwned ? '开' : '关'}`;
       },
@@ -298,6 +306,7 @@
       ui.refresh();
     });
     root.querySelector('[data-act="openSettings"]').addEventListener('click', () => { openSettings(); });
+    root.querySelector('[data-act="list"]').addEventListener('click', () => { openListDrawer(); });
     root.querySelector('[data-act="logowned"]').addEventListener('click', async () => {
       const st = await settings();
       await gmSet(K.settings, Object.assign({}, st, { logOwned: !st.logOwned }));
@@ -613,7 +622,7 @@
     // 关键：已经在库里的条目**一个请求都不发**（不发详情、不发 add-to-library、也不逐条查库）。
     // 逐条查 /i/library/search 是每条一次请求，几百个条目就是几百次 —— 这里改成先拉全库。
     progSet({ phase: '读库', done: 0, total: st.libPages || 40 });
-    const lib = await libraryTitleSet(st, (p) => progSet({ done: p.done, total: p.total }));
+    const lib = await libSnapshot(st, { force: true, onPage: (p) => progSet({ done: p.done, total: p.total }) });
     await log(`Fab：库里有 ${lib.count} 条（翻了 ${lib.pages} 页${lib.truncated ? '，到页数上限了' : ''}）`);
 
     const h = await hist(K.fabHist);
@@ -822,7 +831,9 @@
   // 已拥有的条目一个请求都不发（这是主人明确要的行为）。
   async function libraryTitleSet(st, onPage) {
     const set = new Set();
-    const cap = Math.max(1, Math.min(40, st.libPages || 20));
+    // 上限必须跟设置走：库已 1500+ 条（=64 页），曾经硬砍到 40 页，
+    // 老条目读不到就会被误判成「没领过」，白发详情请求。
+    const cap = Math.max(1, Math.min(200, st.libPages || 20));
     let cursor = '';
     let pages = 0;
     let truncated = false;
@@ -861,6 +872,30 @@
       if (t.length >= 12 && head.startsWith(t.slice(0, 24))) return true;
     }
     return false;
+  }
+
+  // ── 库集合快照：落 GM 缓存，商店页标注不必每次重翻 60+ 页 ──
+  // fabRun 用 force 拿最新（领取判定不要用旧库存）；标注用缓存（默认 24h）。
+  async function libSnapshot(st, opts) {
+    const o = opts || {};
+    const maxAge = Math.max(1, Number(st.libCacheHours) || 24) * 3600000;
+    const cached = await gmGet(K.libCache, null);
+    if (!o.force && cached && Array.isArray(cached.titles) && Date.now() - (cached.at || 0) < maxAge) {
+      // 读回来一律再过一遍 normT：缓存可能是旧版本/手改/别的路径写的，
+      // 没归一化就会跟 libHas 的 normT 对不上（大小写、&amp; 全变成「没领过」）。
+      const titles = cached.titles.map((t) => normT(t)).filter(Boolean);
+      return {
+        set: new Set(titles), count: titles.length, at: cached.at || 0,
+        cached: true, pages: cached.pages || 0, truncated: !!cached.truncated,
+      };
+    }
+    const lib = await libraryTitleSet(st, o.onPage);
+    const rec = {
+      at: Date.now(), titles: Array.from(lib.set), count: lib.count,
+      pages: lib.pages, truncated: lib.truncated,
+    };
+    await gmSet(K.libCache, rec);
+    return { set: lib.set, count: lib.count, at: rec.at, cached: false, pages: lib.pages, truncated: lib.truncated };
   }
 
   // 限时免费专用：走购物车结算。**任何一个环节不是 0 元就撤单**，绝不动钱。
@@ -910,6 +945,475 @@
       await drop();
       return { ok: false, why: '购物车流程 ' + e.message };
     }
+  }
+
+  // ══════════════════════════ 商店页卡片标注（v1.8.0）══════════════════════════
+  // 实测（2026-10-29，s115 直连 Fab SSR 页面拿到的真实 HTML）：
+  //   · 每张卡片都有 a[href="/listings/<uuid>"]，完整标题就在它的 textContent 里
+  //   · 价格是服务端渲染的：限时免费 =「-100% + Free* + <del>¥466.58</del>」，
+  //     多档位 =「From ¥326.59」，单档位 =「¥326.59」
+  //   · 列表接口的 startingPrice 只是最低档价格，licenses[].priceTier 只给一串 id；
+  //     个人/专业各自多少钱，只有 /i/listings/{uid} 的 licenses[].priceTier 才给全
+  // 所以：库状态走本地库集合（零请求）、价格先读卡片本身、档位差异才补详情（带缓存）。
+  const CARD_LINK = 'a[href^="/listings/"]';
+  const CARD_TTL = 12 * 3600 * 1000;
+  const CARD_CACHE_MAX = 800;
+  const cards = new Map();   // uid -> {uid, root, title, owned, price, tiers, freeUntil, requested}
+  let cardTimer = null;
+  let cardObs = null;
+  let cardLib = null;
+  let cardLibBuilding = null;
+  let cardMem = null;
+  let cardFlush = null;
+  let cardDetailBusy = 0;
+
+  function parseCardPrice(text, delText) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    const out = {
+      state: 'unknown', amount: '',
+      original: String(delText || '').replace(/\s+/g, ' ').trim(),
+      pct: 0,
+    };
+    const pct = t.match(/(\d{1,3})\s*%/);
+    if (pct) out.pct = Number(pct[1]);
+    const cur = t.match(/[¥$€£]\s?\d[\d,.]*|\d[\d,.]*\s?(?:元|USD|EUR)/i);
+    if (cur) out.amount = cur[0].replace(/\s+/g, '');
+    if (/free|免费/i.test(t)) out.state = 'free';
+    else if (/(from|起价|起|从)/i.test(t) && out.amount) out.state = 'from';
+    else if (out.amount) out.state = 'paid';
+    return out;
+  }
+
+  function formatMoney(v, cur) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '';
+    const sym = ({ CNY: '¥', USD: '$', EUR: '€', GBP: '£' })[String(cur || '').toUpperCase()] || '';
+    const num = Number.isInteger(n) ? String(n) : n.toFixed(2);
+    return sym ? sym + num : (num + ' ' + String(cur || '')).trim();
+  }
+
+  // 档位摘要：个人/专业各自现在要不要钱、限时免费到哪天
+  function tierSummary(det, nowMs) {
+    const now = Number(nowMs) || Date.now();
+    const tiers = [];
+    let freeUntil = 0;
+    for (const l of ((det && det.licenses) || [])) {
+      const pt = (l && l.priceTier) || {};
+      const price = Number(pt.price) || 0;
+      const discRaw = pt.discountedPrice;
+      const disc = (discRaw === null || discRaw === undefined) ? null : Number(discRaw);
+      const s = pt.discountStartDate ? Date.parse(pt.discountStartDate) : 0;
+      const e = pt.discountEndDate ? Date.parse(pt.discountEndDate) : 0;
+      const inWin = !!(s && e && now >= s && now <= e);
+      const freeNow = price === 0 || (disc === 0 && inWin);
+      const until = (freeNow && inWin && e) ? e : 0;
+      if (until) freeUntil = Math.max(freeUntil, until);
+      tiers.push({
+        name: (l && l.name) || '', rank: tierRank(l),
+        price, freeNow, until, currency: pt.currencyCode || '',
+      });
+    }
+    tiers.sort((a, b) => a.rank - b.rank);
+    return { tiers, freeUntil };
+  }
+
+  // 徽章只标卡片本身没说的东西：在不在库、档位差异、限时剩几天。
+  // 有档位数据时以档位为准 —— 实测有卡片写着 Free*，其实是「UEFN 参考版免费，
+  // 个人 ¥19.93 / 专业 ¥199.92」，跟着卡片文案说「免费」就是骗人。
+  function badgeFor(info, nowMs) {
+    if (!info) return null;
+    const now = Number(nowMs) || Date.now();
+    if (info.owned) return { text: '✓ 已在库', tone: 'ok' };
+    const tiers = info.tiers || [];
+    const pro = tiers.find((t) => t.rank === 0);
+    const per = tiers.find((t) => t.rank === 1);
+    if (per && per.freeNow && pro && !pro.freeNow) {
+      const money = formatMoney(pro.price, pro.currency);
+      return { text: '个人免费 · 专业' + (money ? ' ' + money : '要钱'), tone: 'warn' };
+    }
+    const until = Number(info.freeUntil) || 0;
+    if (until) {
+      const days = Math.round((until - now) / 86400000);
+      return { text: days > 0 ? `限时免费 · 剩 ${days} 天` : '限时免费 · 今天截止', tone: 'warn' };
+    }
+    if (tiers.length) {
+      if (tiers.every((t) => t.freeNow)) return { text: '免费', tone: 'ok' };
+      // 卡片写 Free、档位却要钱（UEFN 参考版免费那种）→ 把真实价格摊开
+      if (info.price && info.price.state === 'free' && (per || pro)) {
+        const parts = [];
+        if (per) parts.push('个人 ' + (formatMoney(per.price, per.currency) || '要钱'));
+        if (pro) parts.push('专业 ' + (formatMoney(pro.price, pro.currency) || '要钱'));
+        return { text: parts.join(' · '), tone: 'warn' };
+      }
+      return null;
+    }
+    if (info.price && info.price.state === 'free') return { text: '免费', tone: 'ok' };
+    return null;
+  }
+
+  function listingIdOf(a) {
+    const href = String((a && a.getAttribute && a.getAttribute('href')) || '');
+    const m = href.match(/\/listings\/([0-9a-fA-F-]{36})/);
+    return m ? m[1].toLowerCase() : '';
+  }
+
+  // 卡片根：往上找「含缩略图、且里面的 listing 链接都指向同一个 uid」的祖先
+  function cardRootOf(a) {
+    const uid = listingIdOf(a);
+    let el = a;
+    for (let i = 0; i < 9 && el && el.parentElement; i++) {
+      el = el.parentElement;
+      if (!el || el === document.body) break;
+      const links = el.querySelectorAll ? el.querySelectorAll(CARD_LINK) : [];
+      if (links.length && links.length <= 3) {
+        let same = true;
+        for (const l of links) { if (listingIdOf(l) !== uid) { same = false; break; } }
+        if (same && el.querySelector('img')) return el;
+      }
+    }
+    return (a && a.parentElement) || a;
+  }
+
+  function titleOfCard(a) {
+    const txt = String((a && a.textContent) || '').replace(/\s+/g, ' ').trim();
+    if (txt) return txt;
+    return String((a && a.getAttribute && a.getAttribute('aria-label')) || '').replace(/\s+by\s+.+$/i, '').trim();
+  }
+
+  // 价格行：有 <del> 原价的（限时免费）直接拿它的父节点；
+  // 否则在卡片里找文本最短且「像价格」的那块（From ¥326.59 / ¥326.59）。
+  function priceRowOf(root) {
+    if (!root || !root.querySelector) return null;
+    const del = root.querySelector('del');
+    if (del && del.parentElement) return del.parentElement;
+    let best = null;
+    for (const el of root.querySelectorAll('div,span')) {
+      const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 40) continue;
+      if (!/free|免费|from|起价|[¥$€£]\s?\d/i.test(t)) continue;
+      if (el.querySelector && el.querySelector(CARD_LINK)) continue;
+      if (!best || t.length > String(best.textContent || '').length) best = el;
+    }
+    return best;
+  }
+
+  function paintCard(c) {
+    if (!c || !c.root || !c.root.querySelector) return;
+    const firstAnchor = c.root.querySelector(CARD_LINK);
+    const info = badgeFor({
+      owned: c.owned, tiers: c.tiers, freeUntil: c.freeUntil, price: c.price,
+    });
+    let el = c.root.querySelector('[data-efc-badge="1"]');
+    if (!info) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('span');
+      el.setAttribute('data-efc-badge', '1');
+      el.style.cssText = 'display:inline-block;margin:2px 0 0 6px;padding:0 6px;border-radius:999px;'
+        + 'font:11px/1.7 system-ui,"Microsoft YaHei",sans-serif;white-space:nowrap;vertical-align:middle;';
+      const row = priceRowOf(c.root);
+      const host = row || (firstAnchor && firstAnchor.parentElement) || c.root;
+      host.appendChild(el);
+    }
+    if (el.textContent !== info.text) el.textContent = info.text;
+    const ok = info.tone === 'ok';
+    const warn = info.tone === 'warn';
+    const bg = ok ? 'rgba(60,180,110,.22)' : (warn ? 'rgba(220,150,40,.22)' : 'rgba(255,255,255,.12)');
+    const fg = ok ? '#7ee2a8' : (warn ? '#ffcf80' : '#c9c9d2');
+    const bd = ok ? 'rgba(126,226,168,.55)' : (warn ? 'rgba(255,207,128,.55)' : 'rgba(255,255,255,.22)');
+    if (el.style.background !== bg) el.style.background = bg;
+    if (el.style.color !== fg) el.style.color = fg;
+    if (el.style.border !== '1px solid ' + bd) el.style.border = '1px solid ' + bd;
+  }
+
+  async function cardCacheGet() {
+    if (cardMem) return cardMem;
+    const raw = await gmGet(K.cardCache, {});
+    cardMem = (raw && typeof raw === 'object') ? raw : {};
+    return cardMem;
+  }
+
+  function cardCachePut(uid, rec) {
+    if (!cardMem) cardMem = {};
+    cardMem[uid] = rec;
+    if (cardFlush) return;
+    cardFlush = setTimeout(async () => {
+      cardFlush = null;
+      const keys = Object.keys(cardMem);
+      if (keys.length > CARD_CACHE_MAX) {
+        keys.sort((a, b) => (cardMem[a].at || 0) - (cardMem[b].at || 0));
+        for (const k of keys.slice(0, keys.length - CARD_CACHE_MAX)) delete cardMem[k];
+      }
+      const cutoff = Date.now() - CARD_TTL * 3;
+      for (const k of Object.keys(cardMem)) if ((cardMem[k].at || 0) < cutoff) delete cardMem[k];
+      await gmSet(K.cardCache, cardMem);
+    }, 800);
+  }
+
+  async function listingTiers(uid) {
+    const cache = await cardCacheGet();
+    const hit = cache[uid];
+    if (hit && Date.now() - (hit.at || 0) < CARD_TTL) return hit;
+    const r = await fetch('/i/listings/' + encodeURIComponent(uid), {
+      credentials: 'include', headers: { Accept: 'application/json' },
+    });
+    if (!r || !r.ok) return null;
+    const det = await r.json();
+    const sum = tierSummary(det);
+    const rec = { at: Date.now(), tiers: sum.tiers, freeUntil: sum.freeUntil };
+    cardCachePut(uid, rec);
+    return rec;
+  }
+
+  function isOnScreen(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    try {
+      const r = el.getBoundingClientRect();
+      const h = window.innerHeight || 800;
+      return r.bottom > -300 && r.top < h + 500;
+    } catch (e) { return false; }
+  }
+
+  // 详情补全：只查非「已在库」且当前在视口附近的卡片，并发 4，命中缓存 0 请求
+  async function queueCardDetails() {
+    const cache = await cardCacheGet();
+    const todo = [];
+    for (const c of cards.values()) {
+      if (c.owned) continue;
+      const hit = cache[c.uid];
+      if (hit && Date.now() - (hit.at || 0) < CARD_TTL) {
+        c.tiers = hit.tiers || null;
+        c.freeUntil = hit.freeUntil || 0;
+        paintCard(c);
+        continue;
+      }
+      if (c.requested || !isOnScreen(c.root)) continue;
+      c.requested = true;
+      todo.push(c);
+    }
+    for (const c of todo) {
+      while (cardDetailBusy >= 4) await sleep(120);
+      cardDetailBusy++;
+      listingTiers(c.uid).then((rec) => {
+        if (!rec) return;
+        c.tiers = rec.tiers || null;
+        c.freeUntil = rec.freeUntil || 0;
+        paintCard(c);
+        renderListIfOpen();
+      }).catch(() => {}).finally(() => { cardDetailBusy--; });
+    }
+  }
+
+  async function ensureCardLib(st) {
+    const maxAge = Math.max(1, Number(st.libCacheHours) || 24) * 3600000;
+    if (cardLib && Date.now() - cardLib.at < maxAge) return cardLib;
+    if (cardLibBuilding) return cardLibBuilding;
+    cardLibBuilding = (async () => {
+      try {
+        const lib = await libSnapshot(st, {});
+        cardLib = lib;
+        await log(`Fab：库集合 ${lib.count} 条（${lib.cached ? '用缓存' : '刚翻 ' + lib.pages + ' 页'}）`);
+        return lib;
+      } catch (e) {
+        await log('Fab：读库失败，卡片标注先停 —— ' + e.message, 'warn');
+        return null;
+      } finally {
+        cardLibBuilding = null;
+      }
+    })();
+    return cardLibBuilding;
+  }
+
+  async function sweepCards() {
+    if (!document.body) return;
+    const st = await settings();
+    if (!st.storeBadges) return;
+    const lib = await ensureCardLib(st);
+    if (!lib) return;
+    const seen = new Set();
+    let added = 0;
+    for (const a of document.querySelectorAll(CARD_LINK)) {
+      const uid = listingIdOf(a);
+      if (!uid || seen.has(uid)) continue;
+      seen.add(uid);
+      const root = cardRootOf(a);
+      if (!root) continue;
+      const prev = cards.get(uid);
+      const c = (prev && prev.root === root) ? prev
+        : { uid, root, title: '', owned: false, price: null, tiers: null, freeUntil: 0, requested: false };
+      if (c.root !== root) { c.root = root; c.requested = false; }
+      c.title = titleOfCard(a);
+      c.owned = libHas(lib, c.title);
+      if (!c.price) {
+        const row = priceRowOf(root);
+        const delEl = root.querySelector ? root.querySelector('del') : null;
+        c.price = parseCardPrice(row ? row.textContent : '', delEl ? delEl.textContent : '');
+      }
+      if (!prev) added++;
+      cards.set(uid, c);
+      paintCard(c);
+    }
+    for (const uid of Array.from(cards.keys())) if (!seen.has(uid)) cards.delete(uid);
+    if (st.storeBadgeTiers) { queueCardDetails().catch(() => {}); }
+    if (added) {
+      let owned = 0;
+      for (const c of cards.values()) if (c.owned) owned++;
+      await log(`Fab：本页卡片 ${cards.size} 张 · 已在库里 ${owned} 张`);
+    }
+    renderListIfOpen();
+  }
+
+  async function startStoreBadges() {
+    const st = await settings();
+    if (!st.storeBadges) return;
+    const kick = () => {
+      if (cardTimer) clearTimeout(cardTimer);
+      cardTimer = setTimeout(() => { cardTimer = null; sweepCards().catch(() => {}); }, 300);
+    };
+    kick();
+    try {
+      if (typeof MutationObserver !== 'undefined') {
+        cardObs = new MutationObserver((muts) => {
+          for (const m of muts) {
+            if (m.target && m.target.closest && m.target.closest('[data-efc-badge="1"]')) continue;
+            if (m.addedNodes && m.addedNodes.length) { kick(); return; }
+          }
+        });
+        cardObs.observe(document.body, { childList: true, subtree: true });
+      }
+    } catch (e) { /* 没有 MutationObserver 也不影响首屏标注 */ }
+    let lastHref = location.href;
+    setInterval(() => {
+      if (location.href !== lastHref) { lastHref = location.href; kick(); }
+    }, 1200);
+  }
+
+  // ── 清单抽屉：把本页卡片连价格、库状态列成一张表 ──
+  let listUi = null;
+  let listFilter = 'all';
+
+  function tierLine(c) {
+    const tiers = c.tiers || [];
+    if (!tiers.length) {
+      if (c.owned) return '已在库';
+      if (c.price && c.price.state === 'free') return '免费';
+      if (c.price && c.price.amount) return (c.price.state === 'from' ? '从 ' : '') + c.price.amount;
+      return '—';
+    }
+    return tiers.map((t) => {
+      const name = t.rank === 0 ? '专业' : (t.rank === 1 ? '个人' : (t.name || '其它'));
+      const money = t.freeNow ? '免费' : (formatMoney(t.price, t.currency) || '要钱');
+      return name + ' ' + money;
+    }).join(' · ');
+  }
+
+  function cardRows() {
+    const rows = Array.from(cards.values());
+    rows.sort((a, b) => {
+      if (a.owned !== b.owned) return a.owned ? 1 : -1;      // 未入库的排前面
+      const af = (a.tiers || []).some((t) => t.freeNow) || (a.price && a.price.state === 'free');
+      const bf = (b.tiers || []).some((t) => t.freeNow) || (b.price && b.price.state === 'free');
+      if (af !== bf) return af ? -1 : 1;
+      return String(a.title).localeCompare(String(b.title));
+    });
+    if (listFilter === 'new') return rows.filter((r) => !r.owned);
+    if (listFilter === 'free') {
+      return rows.filter((r) => (r.tiers || []).some((t) => t.freeNow) || (r.price && r.price.state === 'free'));
+    }
+    return rows;
+  }
+
+  function renderList() {
+    if (!listUi) return;
+    const rows = cardRows();
+    const all = Array.from(cards.values());
+    let owned = 0;
+    for (const c of all) if (c.owned) owned++;
+    const esc = (s) => String(s || '').replace(/[<>&]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[ch]));
+    if (listUi.rows) {
+      listUi.rows.innerHTML = rows.map((c) => {
+        const until = c.freeUntil ? ` · 剩 ${Math.max(0, Math.ceil((c.freeUntil - Date.now()) / 86400000))} 天` : '';
+        return '<div class="r' + (c.owned ? ' owned' : '') + '">'
+          + '<div class="t" title="' + esc(c.title) + '">' + esc(c.title) + '</div>'
+          + '<div class="k">' + (c.owned ? '<b class="y">已入库</b>' : '<span class="n">未入库</span>') + '</div>'
+          + '<div class="p">' + esc(tierLine(c)) + until + '</div>'
+          + '</div>';
+      }).join('') || '<div class="empty">这一页没有可列的卡片</div>';
+    }
+    if (listUi.foot) {
+      listUi.foot.textContent = `本页 ${all.length} 张 · 已在库 ${owned} · 显示 ${rows.length}`;
+    }
+    if (listUi.chips) {
+      for (const b of listUi.chips.querySelectorAll('button')) {
+        b.className = b.getAttribute('data-f') === listFilter ? 'on' : '';
+      }
+    }
+  }
+
+  function renderListIfOpen() { if (listUi) renderList(); }
+
+  function closeList() {
+    const host = document.getElementById('efc-list-host');
+    if (host) host.remove();
+    listUi = null;
+  }
+
+  function openListDrawer() {
+    if (listUi) { renderList(); return listUi; }
+    if (!document.body) return null;
+    const host = document.createElement('div');
+    host.id = 'efc-list-host';
+    host.style.cssText = 'position:fixed;right:16px;top:64px;z-index:2147483646;';
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    root.innerHTML = `
+      <style>
+        :host { all: initial; }
+        .box { font: 12px/1.55 "Microsoft YaHei", system-ui, sans-serif; width: 460px; max-width: 94vw;
+               color: #e8e8ea; background: rgba(20,20,24,.97); border: 1px solid rgba(255,255,255,.16);
+               border-radius: 10px; box-shadow: 0 12px 36px rgba(0,0,0,.5); overflow: hidden; }
+        .hd { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+              background: linear-gradient(90deg, rgba(255,90,140,.28), rgba(120,90,255,.22)); }
+        .hd b { flex: 1; font-size: 12.5px; }
+        .x { cursor: pointer; padding: 0 4px; opacity: .8; }
+        .x:hover { opacity: 1; }
+        .chips { display: flex; gap: 6px; padding: 7px 10px 0; }
+        .chips button { font: inherit; font-size: 11px; color: #d8d8de; background: rgba(255,255,255,.07);
+                        border: 1px solid rgba(255,255,255,.16); border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+        .chips button.on { background: rgba(120,140,255,.28); border-color: rgba(140,160,255,.6); color: #fff; }
+        .rows { max-height: 52vh; overflow: auto; padding: 6px 10px; }
+        .r { display: grid; grid-template-columns: 1fr auto; grid-template-areas: "t k" "p p";
+             gap: 0 8px; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,.07); }
+        .r .t { grid-area: t; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .r .k { grid-area: k; font-size: 11px; }
+        .r .p { grid-area: p; font-size: 11px; color: #a9a9b4; }
+        .r.owned .t { color: #9a9aa6; }
+        .y { color: #7ee2a8; font-weight: 600; }
+        .n { color: #ffcf80; }
+        .empty { padding: 12px 2px; color: #8d8d99; }
+        .ft { padding: 6px 10px 9px; font-size: 11px; color: #8d8d99; border-top: 1px solid rgba(255,255,255,.08); }
+      </style>
+      <div class="box">
+        <div class="hd"><b>Fab 本页清单</b><span class="x">✕</span></div>
+        <div class="chips">
+          <button data-f="all" class="on">全部</button>
+          <button data-f="new">未入库</button>
+          <button data-f="free">免费</button>
+        </div>
+        <div class="rows"></div>
+        <div class="ft"></div>
+      </div>`;
+    listUi = {
+      root,
+      rows: root.querySelector('.rows'),
+      foot: root.querySelector('.ft'),
+      chips: root.querySelector('.chips'),
+    };
+    root.querySelector('.x').addEventListener('click', closeList);
+    for (const b of root.querySelectorAll('.chips button')) {
+      b.addEventListener('click', () => { listFilter = b.getAttribute('data-f'); renderList(); });
+    }
+    renderList();
+    return listUi;
   }
 
   // ══════════════════════════════ Epic 部分 ══════════════════════════════
@@ -1373,6 +1877,14 @@
       ],
     },
     {
+      section: '商店页标注',
+      fields: [
+        { k: 'storeBadges', type: 'bool', label: 'Fab 列表页标注已在库/价格', hint: '卡片上直接显示「已在库」「个人免费 · 专业 ¥X」' },
+        { k: 'storeBadgeTiers', type: 'bool', label: '补详情看个人/专业档位', hint: '只查可视区卡片，结果缓存 12h；关掉只看已在库' },
+        { k: 'libCacheHours', type: 'num', label: '库缓存有效期', min: 1, max: 168, unit: '小时', hint: '过期后第一次浏览 Fab 会重翻一遍库' },
+      ],
+    },
+    {
       section: '汇报方式',
       fields: [
         { k: 'toastEnabled', type: 'bool', label: '显示右下角浮窗', hint: '关掉就完全静默，只看面板日志' },
@@ -1724,6 +2236,8 @@
     if (host.endsWith('fab.com')) {
       if (location.pathname.startsWith('/login') || location.pathname.startsWith('/signin')) return;
       mountPanel('Fab 免费资产');
+      // 标注不用等领取跑完：先把这一页的卡片标出来
+      startStoreBadges().catch(() => {});
       await fabRun(false);
       if (new URLSearchParams(location.search).get('efc') === 'scan') {
         await closeSelfIfOpened();   // 这是我们自己开的扫描标签，扫完就退场（汇总由发起页去弹）
@@ -1751,7 +2265,7 @@
   }
 
   // 给离线自测留出口（node 里 stub 一个 window 就能验纯逻辑，不影响正常使用）
-  window.__efcInternals = { DEF_SETTINGS, SETTINGS_SCHEMA, normalizeSettings, openSettings, VERSION, freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines };
+  window.__efcInternals = { DEF_SETTINGS, SETTINGS_SCHEMA, normalizeSettings, openSettings, VERSION, freeWindow, priceIsZero, claimUrlFor, SEL, tierRank, isProTier, freeUntilOf, successText, ownedCtaText, dayKey, fabRun, dailyCheck, dailyGet, dailyPatch, summaryLines, parseCardPrice, badgeFor, tierSummary, formatMoney, sweepCards, openListDrawer, cards, libHas, normT, libraryTitleSet, libSnapshot };
 
   mountSettingsMenu();
 
