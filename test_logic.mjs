@@ -193,6 +193,16 @@ console.log('CLAIM-DETECT PASS');
   if (bad) process.exit(1);
 }
 
+// ── 头部 @version 必须和代码里的 VERSION 一致（Tampermonkey 靠头部判断要不要更新，
+//    只改常量不改头部 = 用户永远收不到新版）──
+{
+  const m = src.match(/\/\/\s*@version\s+(\S+)/);
+  const got = m ? m[1] : '(缺失)';
+  const ok = got === I.VERSION;
+  console.log(`${ok ? 'PASS' : 'FAIL'} 头部 @version = ${got}，VERSION = ${I.VERSION}`);
+  if (!ok) process.exit(1);
+}
+
 // ── normalizeSettings：脏值要能兜住（导入/手改/旧版本）──
 {
   const N = I.normalizeSettings;

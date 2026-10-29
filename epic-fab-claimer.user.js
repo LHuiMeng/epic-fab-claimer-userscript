@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Epic/Fab 免费领取助手
 // @namespace    ruindream.efc
-// @version      1.8.0
+// @version      1.9.0
 // @description  打开浏览器就自动扫 Epic 每周免费 + Fab 免费/限时免费并领取；Fab 商店列表页直接标注「已在库 / 个人免费·专业要钱 / 限时免费剩几天」，面板可看带价格的清单；限时免费走 0 元购物车结算；结果用角落悬浮窗汇报。
 // @author       桃夭
 // @homepageURL  https://github.com/LHuiMeng/epic-fab-claimer-userscript
